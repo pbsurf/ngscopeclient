@@ -22,6 +22,42 @@ instrument using the UHD API.
 This provides network transparency for USB-attached instruments, as well as a license boundary between the BSD-licensed
 libscopehal core and the GPL-licensed UHD API.
 
+\section{Analog Devices}
+
+\begin{tabularx}{16cm}{lllX}
+\thickhline
+\textbf{Device Family} & \textbf{Driver} & \textbf{Transport} & \textbf{Notes} \\
+\thickhline
+ADALM-PLUTO, other AD9361/AD9363/AD9364 SDRs & iio & iio & Receive only \\
+\thickhline
+\end{tabularx}
+
+\subsection{iio}
+
+This driver talks to radios based on the AD9361 family (including the AD9363 in the ADALM-PLUTO) using
+\href{https://github.com/analogdevicesinc/libiio}{libiio} directly, without a bridge process. It is only available
+if ngscopeclient was built with libiio 0.x (0.26 has been tested); newer 1.x releases are not supported yet.
+
+The transport path is a libiio context URI such as \texttt{ip:192.168.2.1} (the default address of a PlutoSDR
+connected by USB), \texttt{usb:1.5.5}, or \texttt{local:}. A bare hostname or IP address is treated as an \texttt{ip:}
+URI. Radios with two receive paths show up as two complex channels.
+
+The center frequency sets the receive local oscillator and the span sets the analog RF bandwidth. The sample rate is
+configured separately, and should be at least as wide as the span. If the radio rejects a setting (for example, the
+AD9363 in a stock PlutoSDR cannot tune below 325 MHz) the value snaps back to what the radio is actually doing.
+
+Some things to be aware of:
+\begin{itemize}
+\item Only receive is supported. Gain is left at whatever the radio is currently configured for (a PlutoSDR
+defaults to automatic gain control) and cannot yet be changed from ngscopeclient.
+\item Data is captured in blocks of the selected memory depth, so consecutive acquisitions are not gap free.
+\item The link to the radio limits the usable sample rate. Over USB 2.0 the higher rates will not keep up.
+\end{itemize}
+
+For development and testing without hardware, use the transport path \texttt{mock:} (a simulated single-channel
+AD9363) or \texttt{mock:ad9361} (two channels). The simulated radio receives a few fixed RF tones in the 433~MHz,
+915~MHz and 2.4~GHz bands, which move around as you retune it.
+
 \section{Microphase}
 
 The AntSDR running antsdr\_uhd firmware is supported by the ``uhd" driver for Ettus Research SDRs. There is currently no
