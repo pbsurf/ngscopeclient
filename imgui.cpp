@@ -1728,6 +1728,7 @@ ImGuiIO::ImGuiIO()
     // Inputs Behaviors
     MouseDoubleClickTime = 0.30f;
     MouseDoubleClickMaxDist = 6.0f;
+    MouseDoubleClickMaxDistTouch = 24.0f;
     MouseDragThreshold = 6.0f;
     KeyRepeatDelay = 0.275f;
     KeyRepeatRate = 0.050f;
@@ -10887,7 +10888,8 @@ static void ImGui::UpdateMouseInputs()
             if ((float)(g.Time - io.MouseClickedTime[i]) < io.MouseDoubleClickTime)
             {
                 ImVec2 delta_from_click_pos = IsMousePosValid(&io.MousePos) ? (io.MousePos - io.MouseClickedPos[i]) : ImVec2(0.0f, 0.0f);
-                if (ImLengthSqr(delta_from_click_pos) < io.MouseDoubleClickMaxDist * io.MouseDoubleClickMaxDist)
+                const float double_click_max_dist = (io.MouseSource == ImGuiMouseSource_TouchScreen) ? io.MouseDoubleClickMaxDistTouch : io.MouseDoubleClickMaxDist;
+                if (ImLengthSqr(delta_from_click_pos) < double_click_max_dist * double_click_max_dist)
                     is_repeated_click = true;
             }
             if (is_repeated_click)

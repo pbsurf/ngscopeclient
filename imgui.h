@@ -2554,6 +2554,7 @@ struct ImGuiIO
     // (other variables, ones which are expected to be tweaked within UI code, are exposed in ImGuiStyle)
     float       MouseDoubleClickTime;           // = 0.30f          // Time for a double-click, in seconds.
     float       MouseDoubleClickMaxDist;        // = 6.0f           // Distance threshold to stay in to validate a double-click, in pixels.
+    float       MouseDoubleClickMaxDistTouch;   // = 24.0f          // Same as MouseDoubleClickMaxDist, but used when the clicks come from a touch screen (ImGuiMouseSource_TouchScreen), as fingers are less precise.
     float       MouseDragThreshold;             // = 6.0f           // Distance threshold before considering we are dragging.
     float       KeyRepeatDelay;                 // = 0.275f         // When holding a key/button, time before it starts repeating, in seconds (for buttons in Repeat mode, etc.).
     float       KeyRepeatRate;                  // = 0.050f         // When holding a key/button, rate at which it repeats, in seconds.
