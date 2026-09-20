@@ -131,6 +131,8 @@
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include <stdio.h>              // for snprintf()
+#include <stdlib.h>             // for atof()
+#include <string.h>             // for strncmp(), strchr()
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
@@ -1101,12 +1103,52 @@ float ImGui_ImplSDL2_GetContentScaleForWindow(SDL_Window* window)
     return ImGui_ImplSDL2_GetContentScaleForDisplay(SDL_GetWindowDisplayIndex(window));
 }
 
+#if defined(SDL_VIDEO_DRIVER_X11) && defined(__linux__)
+// SDL2 on X11 derives DPI from the monitor's physical size (XRandR mm), which ignores the user's desktop scaling
+// setting and fails outright when the size is reported as 0mm (VMs, some KVMs/adapters).
+// GLFW instead uses the Xft.dpi X resource (what desktop environments set for UI scaling). Do the same here.
+// Returns the Xft.dpi value, or 0.0f if it is unavailable.
+static float ImGui_ImplSDL2_GetX11XftDpi()
+{
+    Display* display = XOpenDisplay(nullptr);
+    if (display == nullptr)
+        return 0.0f;
+    float dpi = 0.0f;
+    if (const char* resources = XResourceManagerString(display))
+    {
+        // Entries look like "Xft.dpi:\t192", one per line
+        for (const char* p = resources; p != nullptr && *p != 0; )
+        {
+            if (strncmp(p, "Xft.dpi:", 8) == 0)
+            {
+                dpi = (float)atof(p + 8);
+                break;
+            }
+            p = strchr(p, '\n');
+            if (p != nullptr)
+                p++;
+        }
+    }
+    XCloseDisplay(display);
+    return dpi;
+}
+#endif
+
 // SDL_GetDisplayDPI() seems rather unreliable on Linux.
 float ImGui_ImplSDL2_GetContentScaleForDisplay(int display_index)
 {
     const char* sdl_driver = SDL_GetCurrentVideoDriver();
     if (sdl_driver && strcmp(sdl_driver, "wayland") == 0)
         return 1.0f;
+#if defined(SDL_VIDEO_DRIVER_X11) && defined(__linux__)
+    if (sdl_driver && strcmp(sdl_driver, "x11") == 0)
+    {
+        // Prefer the desktop's configured scale (matches GLFW behavior), falling back to SDL below
+        const float xft_dpi = ImGui_ImplSDL2_GetX11XftDpi();
+        if (xft_dpi > 0.0f)
+            return (xft_dpi < 96.0f) ? 1.0f : xft_dpi / 96.0f;
+    }
+#endif
 #if SDL_HAS_PER_MONITOR_DPI
 #if !defined(__APPLE__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
     float dpi = 0.0f;
