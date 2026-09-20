@@ -189,15 +189,11 @@ struct ImGui_ImplSDL2_Data
 
     // Touch handling: a single finger is converted to mouse input, two or more fingers to mouse position + wheel (pinch zoom)
     ImVector<ImGui_ImplSDL2_TouchFinger> TouchFingers;      // Fingers currently down, in order of touch down
-    bool                    TouchMouseDown;                 // We are holding the left mouse button on behalf of a single finger
     bool                    TouchMultiActive;               // Set when a second finger goes down, cleared when all fingers are up
-    bool                    PinchActive;                    // True while at least two fingers are down in multitouch mode
-    SDL_FingerID            PinchFingerId[2];               // The (first two) fingers currently being used for the pinch
     bool                    PinchHorizontal;                // Orientation of the fingers when the pinch started
     float                   PinchLastDistance;
     bool                    PinchPosPending;                // Pinch mouse position/wheel are accumulated here and sent once per frame, see ImGui_ImplSDL2_PinchFlush()
-    ImVec2                  PinchPendingPos;
-    Uint32                  PinchPendingWindowID;
+    ImVec2                  PinchPendingPos;                // In mouse coordinates
     ImVec2                  PinchPendingWheel;
     bool                    PinchFlushedPosLast;
 
@@ -429,10 +425,18 @@ static ImGuiViewport* ImGui_ImplSDL2_GetViewportForWindowID(Uint32 window_id)
 // Positive wheel values mean fingers spreading apart (zoom in). Each wheel step corresponds to a zoom factor of PINCH_ZOOM_STEP_FACTOR,
 // matching the per-step zoom applied by the application, so the content scales 1:1 with the finger spread.
 // These events are sent with ImGuiMouseSource_TouchScreen so the application can tell them apart from real scrolling.
+//
+// Notes on platform quirks:
+// - On X11, SDL_CaptureMouse() (pointer grab) while fingers are down causes FINGERUP events to be lost, so we never capture during touch.
+// - Touch panels may reassign finger ids mid-gesture (one finger up and another down in the same millisecond); handled by restarting the pinch.
 static const float PINCH_ZOOM_STEP_FACTOR = 1.5f;
 
-// Temporary debug logging for touch input bring-up
-#define PINCH_LOG(...) do { printf("[pinch] " __VA_ARGS__); fflush(stdout); } while(0)
+// Define IMGUI_IMPL_SDL2_TOUCH_DEBUG to log touch input to stdout
+#ifdef IMGUI_IMPL_SDL2_TOUCH_DEBUG
+#define TOUCH_LOG(...) do { printf("[touch] " __VA_ARGS__); fflush(stdout); } while(0)
+#else
+#define TOUCH_LOG(...) do { } while(0)
+#endif
 
 static int ImGui_ImplSDL2_TouchFindFinger(const ImGui_ImplSDL2_Data* bd, SDL_FingerID id)
 {
@@ -452,24 +456,29 @@ static ImVec2 ImGui_ImplSDL2_FingerToWindowPos(const SDL_TouchFingerEvent* finge
     return ImVec2(finger->x * (float)w, finger->y * (float)h);
 }
 
-static void ImGui_ImplSDL2_AddTouchMousePos(ImGuiIO& io, ImVec2 pos, Uint32 window_id)
+// Convert window coordinates to the space used for io.AddMousePosEvent() (same handling as SDL_MOUSEMOTION)
+static ImVec2 ImGui_ImplSDL2_WindowToMousePos(ImVec2 pos, Uint32 window_id)
 {
-    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
         int window_x, window_y;
         SDL_GetWindowPosition(SDL_GetWindowFromID(window_id), &window_x, &window_y);
         pos.x += window_x;
         pos.y += window_y;
     }
+    return pos;
+}
+
+static void ImGui_ImplSDL2_AddTouchMousePos(ImGuiIO& io, ImVec2 mouse_pos)
+{
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-    io.AddMousePosEvent(pos.x, pos.y);
+    io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
 }
 
 static void ImGui_ImplSDL2_TouchSetLeftButton(ImGui_ImplSDL2_Data* bd, ImGuiIO& io, bool down)
 {
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
     io.AddMouseButtonEvent(0, down);
-    bd->TouchMouseDown = down;
     bd->MouseButtonsDown = down ? (bd->MouseButtonsDown | (1 << 0)) : (bd->MouseButtonsDown & ~(1 << 0));
 }
 
@@ -481,21 +490,21 @@ static void ImGui_ImplSDL2_PinchFlush(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
     bool wheel_pending = (bd->PinchPendingWheel.x != 0.0f || bd->PinchPendingWheel.y != 0.0f);
     if (bd->PinchPosPending && (!wheel_pending || !bd->PinchFlushedPosLast))
     {
-        ImGui_ImplSDL2_AddTouchMousePos(io, bd->PinchPendingPos, bd->PinchPendingWindowID);
+        ImGui_ImplSDL2_AddTouchMousePos(io, bd->PinchPendingPos);
         bd->PinchPosPending = false;
         bd->PinchFlushedPosLast = true;
     }
     else if (wheel_pending)
     {
-        PINCH_LOG("  flush wheel x=%.4f y=%.4f\n", bd->PinchPendingWheel.x, bd->PinchPendingWheel.y);
         io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
         io.AddMouseWheelEvent(bd->PinchPendingWheel.x, bd->PinchPendingWheel.y);
         bd->PinchPendingWheel = ImVec2(0.0f, 0.0f);
         bd->PinchFlushedPosLast = false;
+        wheel_pending = false;
     }
 
     // Make sure we get another frame to send whatever is left, in case the app is only rendering in response to events
-    if (bd->PinchPosPending || bd->PinchPendingWheel.x != 0.0f || bd->PinchPendingWheel.y != 0.0f)
+    if (bd->PinchPosPending || wheel_pending)
     {
         SDL_Event wake;
         memset(&wake, 0, sizeof(wake));
@@ -504,42 +513,28 @@ static void ImGui_ImplSDL2_PinchFlush(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
     }
 }
 
-// Update pinch state from the first two fingers. Called after any change in the fingers while in multitouch mode.
-static void ImGui_ImplSDL2_PinchUpdate(ImGui_ImplSDL2_Data* bd)
+// Update pinch from the first two fingers. Call with restart=true when the set of fingers has changed, false when they have only moved.
+static void ImGui_ImplSDL2_PinchUpdate(ImGui_ImplSDL2_Data* bd, bool restart)
 {
     if (bd->TouchFingers.Size < 2)
-    {
-        bd->PinchActive = false;
         return;
-    }
     const ImGui_ImplSDL2_TouchFinger& f0 = bd->TouchFingers[0];
     const ImGui_ImplSDL2_TouchFinger& f1 = bd->TouchFingers[1];
     float dx = f1.Pos.x - f0.Pos.x;
     float dy = f1.Pos.y - f0.Pos.y;
     float distance = sqrtf(dx * dx + dy * dy);
-    ImVec2 mid((f0.Pos.x + f1.Pos.x) * 0.5f, (f0.Pos.y + f1.Pos.y) * 0.5f);
+
     bd->PinchPosPending = true;
-    bd->PinchPendingPos = mid;
-    bd->PinchPendingWindowID = f0.WindowID;
+    bd->PinchPendingPos = ImGui_ImplSDL2_WindowToMousePos(ImVec2((f0.Pos.x + f1.Pos.x) * 0.5f, (f0.Pos.y + f1.Pos.y) * 0.5f), f0.WindowID);
 
-    // (Re)start the pinch if this is the first update or the pair of fingers has changed
-    if (!bd->PinchActive || bd->PinchFingerId[0] != f0.Id || bd->PinchFingerId[1] != f1.Id)
+    if (restart)
     {
-        bd->PinchActive = true;
-        bd->PinchFingerId[0] = f0.Id;
-        bd->PinchFingerId[1] = f1.Id;
-        bd->PinchLastDistance = distance;
         bd->PinchHorizontal = fabsf(dx) >= fabsf(dy);
-        PINCH_LOG("  PINCH BEGIN: fingers %lld,%lld distance=%.1f mid=(%.1f, %.1f) axis=%s\n", (long long)f0.Id, (long long)f1.Id, distance, mid.x, mid.y,
-            bd->PinchHorizontal ? "horizontal" : "vertical");
-        return;
+        TOUCH_LOG("pinch begin: fingers %lld,%lld distance=%.1f axis=%s\n", (long long)f0.Id, (long long)f1.Id, distance, bd->PinchHorizontal ? "horizontal" : "vertical");
     }
-
-    if (distance > 0.0f && bd->PinchLastDistance > 0.0f)
+    else if (distance > 0.0f && bd->PinchLastDistance > 0.0f)
     {
         float wheel = logf(distance / bd->PinchLastDistance) / logf(PINCH_ZOOM_STEP_FACTOR);
-        PINCH_LOG("  PINCH MOTION: distance=%.1f (last %.1f) mid=(%.1f, %.1f) wheel=%.4f on %s axis\n", distance, bd->PinchLastDistance, mid.x, mid.y, wheel,
-            bd->PinchHorizontal ? "horizontal" : "vertical");
         if (bd->PinchHorizontal)
             bd->PinchPendingWheel.x += wheel;
         else
@@ -553,23 +548,15 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
     ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
     ImGuiIO& io = ImGui::GetIO();
 
-#if SDL_VERSION_ATLEAST(2,0,10)
-    int dev_type = (int)SDL_GetTouchDeviceType(finger->touchId);
-#else
-    int dev_type = -1;
-#endif
-    PINCH_LOG("finger %s t=%u id=%lld touch=%lld dev_type=%d win=%u x=%.3f y=%.3f dx=%.3f dy=%.3f (tracked=%d multi=%d)\n",
-        finger->type == SDL_FINGERDOWN ? "DOWN" : finger->type == SDL_FINGERUP ? "UP" : "MOTION",
-        finger->timestamp, (long long)finger->fingerId, (long long)finger->touchId, dev_type,
-        finger->windowID, finger->x, finger->y, finger->dx, finger->dy, bd->TouchFingers.Size, (int)bd->TouchMultiActive);
+    TOUCH_LOG("finger %s t=%u id=%lld touch=%lld win=%u x=%.3f y=%.3f (tracked=%d multi=%d)\n",
+        finger->type == SDL_FINGERDOWN ? "down" : finger->type == SDL_FINGERUP ? "up" : "motion",
+        finger->timestamp, (long long)finger->fingerId, (long long)finger->touchId, finger->windowID, finger->x, finger->y,
+        bd->TouchFingers.Size, (int)bd->TouchMultiActive);
 
 #if SDL_VERSION_ATLEAST(2,0,10)
     // Touchpads report finger events with device-relative coordinates, and already generate scroll events. Only handle touchscreens.
-    if (dev_type != SDL_TOUCH_DEVICE_DIRECT)
-    {
-        PINCH_LOG("  ignored: touch device is not a direct touchscreen\n");
+    if (SDL_GetTouchDeviceType(finger->touchId) != SDL_TOUCH_DEVICE_DIRECT)
         return false;
-    }
 #endif
 
     int slot = ImGui_ImplSDL2_TouchFindFinger(bd, finger->fingerId);
@@ -579,20 +566,11 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
         {
             Uint32 window_id = finger->windowID ? finger->windowID : bd->WindowID;
             if (ImGui_ImplSDL2_GetViewportForWindowID(window_id) == nullptr)
-            {
-                PINCH_LOG("  ignored: no viewport for window %u\n", window_id);
                 return false;
-            }
             if (bd->TouchFingers.Size > 0 && bd->TouchFingers[0].WindowID != window_id)
-            {
-                PINCH_LOG("  ignored: finger is in a different window (%u vs %u)\n", window_id, bd->TouchFingers[0].WindowID);
-                return false;
-            }
+                return false; // Fingers in different windows can't be combined
             if (slot >= 0)
-            {
-                PINCH_LOG("  finger was already down, replacing it\n");
-                bd->TouchFingers.erase(bd->TouchFingers.Data + slot);
-            }
+                bd->TouchFingers.erase(bd->TouchFingers.Data + slot); // Finger already down (missed the up event?)
 
             ImGui_ImplSDL2_TouchFinger f;
             f.Id = finger->fingerId;
@@ -604,52 +582,42 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
             {
                 // Single finger: acts as the left mouse button
                 bd->PinchPosPending = false;
-                ImGui_ImplSDL2_AddTouchMousePos(io, f.Pos, window_id);
+                ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, window_id));
                 ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
             }
             else if (bd->TouchFingers.Size >= 2)
             {
                 // Second finger down: cancel any click/drag started by the first finger and switch to multitouch
-                if (bd->TouchMouseDown)
+                if (!bd->TouchMultiActive)
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false);
                 bd->TouchMultiActive = true;
-                ImGui_ImplSDL2_PinchUpdate(bd);
+                ImGui_ImplSDL2_PinchUpdate(bd, true);
             }
             return true;
         }
         case SDL_FINGERMOTION:
         {
             if (slot < 0)
-            {
-                PINCH_LOG("  ignored: motion for a finger that isn't down\n");
                 return false;
-            }
-            bd->TouchFingers[slot].Pos = ImGui_ImplSDL2_FingerToWindowPos(finger, bd->TouchFingers[slot].WindowID);
+            ImGui_ImplSDL2_TouchFinger& f = bd->TouchFingers[slot];
+            f.Pos = ImGui_ImplSDL2_FingerToWindowPos(finger, f.WindowID);
             if (bd->TouchMultiActive)
-                ImGui_ImplSDL2_PinchUpdate(bd);
+                ImGui_ImplSDL2_PinchUpdate(bd, false);
             else
-                ImGui_ImplSDL2_AddTouchMousePos(io, bd->TouchFingers[slot].Pos, bd->TouchFingers[slot].WindowID);
+                ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, f.WindowID));
             return true;
         }
         case SDL_FINGERUP:
         {
             if (slot < 0)
-            {
-                PINCH_LOG("  ignored: up for a finger that isn't down\n");
                 return false;
-            }
             bd->TouchFingers.erase(bd->TouchFingers.Data + slot);
-            if (bd->TouchMouseDown)
-                ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false);
-            if (bd->TouchFingers.Size == 0)
-            {
-                if (bd->PinchActive)
-                    PINCH_LOG("  PINCH END\n");
+            if (!bd->TouchMultiActive)
+                ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false); // Was the single finger
+            else if (bd->TouchFingers.Size == 0)
                 bd->TouchMultiActive = false;
-                bd->PinchActive = false;
-            }
-            else if (bd->TouchMultiActive)
-                ImGui_ImplSDL2_PinchUpdate(bd); // Pinch continues with the remaining fingers if there are at least two
+            else
+                ImGui_ImplSDL2_PinchUpdate(bd, true); // Pinch continues with the first two remaining fingers, if any
             return true;
         }
     }
@@ -690,7 +658,6 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
         {
             if (ImGui_ImplSDL2_GetViewportForWindowID(event->wheel.windowID) == nullptr)
                 return false;
-            PINCH_LOG("SDL mouse wheel from %s: x=%.2f y=%.2f\n", event->wheel.which == SDL_TOUCH_MOUSEID ? "touch" : "mouse", event->wheel.preciseX, event->wheel.preciseY);
             //IMGUI_DEBUG_LOG("wheel %.2f %.2f, precise %.2f %.2f\n", (float)event->wheel.x, (float)event->wheel.y, event->wheel.preciseX, event->wheel.preciseY);
 #if SDL_VERSION_ATLEAST(2,0,18) // If this fails to compile on Emscripten: update to latest Emscripten!
             float wheel_x = -event->wheel.preciseX;
@@ -726,9 +693,6 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
             bd->MouseButtonsDown = (event->type == SDL_MOUSEBUTTONDOWN) ? (bd->MouseButtonsDown | (1 << mouse_button)) : (bd->MouseButtonsDown & ~(1 << mouse_button));
             return true;
         }
-        case SDL_MULTIGESTURE:
-            PINCH_LOG("SDL multigesture: fingers=%d dDist=%.4f dTheta=%.4f x=%.3f y=%.3f\n", event->mgesture.numFingers, event->mgesture.dDist, event->mgesture.dTheta, event->mgesture.x, event->mgesture.y);
-            return false;
         case SDL_FINGERDOWN:
         case SDL_FINGERMOTION:
         case SDL_FINGERUP:
@@ -837,9 +801,11 @@ static bool ImGui_ImplSDL2_Init(SDL_Window* window, SDL_Renderer* renderer, void
 
     bd->Window = window;
 
-    PINCH_LOG("init: video driver=%s, %d touch device(s)\n", SDL_GetCurrentVideoDriver(), SDL_GetNumTouchDevices());
+#ifdef IMGUI_IMPL_SDL2_TOUCH_DEBUG
+    TOUCH_LOG("init: video driver=%s, %d touch device(s)\n", SDL_GetCurrentVideoDriver(), SDL_GetNumTouchDevices());
     for (int i = 0; i < SDL_GetNumTouchDevices(); i++)
-        PINCH_LOG("init:   touch device %d: id=%lld name=%s type=%d\n", i, (long long)SDL_GetTouchDevice(i), SDL_GetTouchName(i) ? SDL_GetTouchName(i) : "?", (int)SDL_GetTouchDeviceType(SDL_GetTouchDevice(i)));
+        TOUCH_LOG("init:   touch device %d: id=%lld name=%s type=%d\n", i, (long long)SDL_GetTouchDevice(i), SDL_GetTouchName(i) ? SDL_GetTouchName(i) : "?", (int)SDL_GetTouchDeviceType(SDL_GetTouchDevice(i)));
+#endif
     bd->WindowID = SDL_GetWindowID(window);
     bd->Renderer = renderer;
 
@@ -1028,7 +994,7 @@ static void ImGui_ImplSDL2_UpdateMouseData()
     // Never capture (grab the pointer) while fingers are on a touchscreen: on X11 this makes us lose FINGERUP events, leaving stale fingers.
     // Testing for fingers rather than just our emulated button matters, as when a second finger lands the button release we queue is not seen by
     // imgui until the next NewFrame, so for one frame it can still see a drag in progress.
-    const bool touch_active = (bd->TouchFingers.Size > 0 || bd->TouchMouseDown);
+    const bool touch_active = (bd->TouchFingers.Size > 0);
     if (bd->MouseCaptureMode == ImGui_ImplSDL2_MouseCaptureMode_Enabled)
     {
         SDL_CaptureMouse((bd->MouseButtonsDown != 0 && !touch_active) ? SDL_TRUE : SDL_FALSE);
@@ -1041,12 +1007,6 @@ static void ImGui_ImplSDL2_UpdateMouseData()
                 want_capture = true;
         if (touch_active)
             want_capture = false;
-        static bool s_lastWantCapture = false;
-        if (want_capture != s_lastWantCapture)
-        {
-            PINCH_LOG("mouse capture %s\n", want_capture ? "on" : "off");
-            s_lastWantCapture = want_capture;
-        }
         SDL_CaptureMouse(want_capture ? SDL_TRUE : SDL_FALSE);
     }
 
