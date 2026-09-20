@@ -40,23 +40,30 @@ if ngscopeclient was built with libiio 0.x (0.26 has been tested); newer 1.x rel
 
 The transport path is a libiio context URI such as \texttt{ip:192.168.2.1} (the default address of a PlutoSDR
 connected by USB), \texttt{usb:1.5.5}, or \texttt{local:}. A bare hostname or IP address is treated as an \texttt{ip:}
-URI. Radios with two receive paths show up as two complex channels.
+URI. USB-attached radios are listed in the Endpoint drop-down of the Add Instrument dialog. Radios with two receive
+paths show up as two complex channels.
 
 The center frequency sets the receive local oscillator and the span sets the analog RF bandwidth. The sample rate is
-configured separately, and should be at least as wide as the span. If the radio rejects a setting (for example, the
-AD9363 in a stock PlutoSDR cannot tune below 325 MHz) the value snaps back to what the radio is actually doing.
+configured separately, and should be at least as wide as the span. The limits for each of these come from the radio
+(the AD9363 in a stock PlutoSDR cannot tune below 325 MHz, for example, while an AD9361 or a PlutoSDR with unlocked
+firmware can), so values you enter are limited to what the radio supports.
+
+The receiver gain is in the Input section of the channel properties. The gain mode selects between manual gain and
+the radio's automatic gain control (AGC) modes. The gain can only be set by hand in manual mode. A radio that has just
+powered up is normally running AGC, and ngscopeclient leaves that alone until you change it. The gain mode and gain
+are saved in sessions along with the other settings.
 
 Some things to be aware of:
 \begin{itemize}
-\item Only receive is supported. Gain is left at whatever the radio is currently configured for (a PlutoSDR
-defaults to automatic gain control) and cannot yet be changed from ngscopeclient.
+\item Only receive is supported.
 \item Data is captured in blocks of the selected memory depth, so consecutive acquisitions are not gap free.
 \item The link to the radio limits the usable sample rate. Over USB 2.0 the higher rates will not keep up.
 \end{itemize}
 
 For development and testing without hardware, use the transport path \texttt{mock:} (a simulated single-channel
 AD9363) or \texttt{mock:ad9361} (two channels). The simulated radio receives a few fixed RF tones in the 433~MHz,
-915~MHz and 2.4~GHz bands, which move around as you retune it.
+915~MHz and 2.4~GHz bands, which move around as you retune it. In manual gain mode the simulated signal gets stronger
+and weaker as you change the gain.
 
 \section{Microphase}
 
