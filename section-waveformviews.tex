@@ -19,6 +19,10 @@ on the position of the mouse cursor.
 
 %Pressing the middle mouse button auto-scales the active waveform group so that the entire waveform is visible.
 
+Holding CTRL and dragging with the left mouse button in the plot area draws a box, and zooming to that box both scales
+the horizontal axis of the waveform group and adjusts the gain and offset of the view's Y axis to match. A box that is
+very narrow or very short only zooms the other axis. Pressing ESC while dragging cancels the zoom.
+
 \section{Plot Area}
 
 The plot area shows the waveform being displayed. The horizontal grid lines line up with the voltage scale markings on
@@ -39,8 +43,8 @@ the graph may be seen as lighter or darker areas. This is referred to as ``inten
 Each waveform view has its own Y axis scale, which is locked to the ADC range of the instrument.
 
 Channel gain may be configured by scrolling with the mouse wheel, and offset may be adjusted by dragging the scale with
-the left mouse button. Pressing the middle mouse button on the Y axis will auto-scale the vertical gain and offset to
-show the full span of all channels in the view with 5\% of vertical margin.
+the left mouse button. Pressing the middle mouse button (or double-clicking or double-tapping) on the Y axis will
+auto-scale the vertical gain and offset to show the full span of all channels in the view with 5\% of vertical margin.
 
 If a left-pointing arrow (as seen in Fig. \ref{y-axis}) is visible, one of the channels in the view is selected as a
 trigger source. Click on the arrow and drag up or down to select the trigger level. Some trigger types, such as window
