@@ -119,6 +119,11 @@ To build the LXI component (needed if you have LXI- or VXI-11-based instruments)
 sudo apt install liblxi-dev libtirpc-dev
 \end{lstlisting}
 
+To build the IIO component (needed for Analog Devices IIO-based SDRs such as the ADALM-PLUTO). Only libiio 0.x is supported; libiio 1.0 and later will be ignored:
+\begin{lstlisting}[language=sh, numbers=none]
+sudo apt install libiio-dev
+\end{lstlisting}
+
 To build the documentation, you will also need LaTeX packages:
 \begin{lstlisting}[language=sh, numbers=none]
 sudo apt install texlive texlive-fonts-extra texlive-extra-utils
@@ -144,6 +149,11 @@ To build the LXI component (needed if you have LXI- or VXI-11-based instruments)
 sudo apt install liblxi-dev libtirpc-dev
 \end{lstlisting}
 
+To build the IIO component (needed for Analog Devices IIO-based SDRs such as the ADALM-PLUTO). Only libiio 0.x is supported; libiio 1.0 and later will be ignored:
+\begin{lstlisting}[language=sh, numbers=none]
+sudo apt install libiio-dev
+\end{lstlisting}
+
 To build the documentation, you will also need LaTeX packages:
 \begin{lstlisting}[language=sh, numbers=none]
 sudo apt install texlive texlive-fonts-extra texlive-extra-utils
@@ -164,6 +174,11 @@ sudo dnf install vulkan-headers vulkan-loader-devel glslang-devel glslc libshade
 To build the LXI component (needed if you have LXI- or VXI-11-based instruments):
 \begin{lstlisting}[language=sh, numbers=none]
 sudo dnf install liblxi-devel libtirpc-devel
+\end{lstlisting}
+
+To build the IIO component (needed for Analog Devices IIO-based SDRs such as the ADALM-PLUTO). Only libiio 0.x is supported; libiio 1.0 and later will be ignored:
+\begin{lstlisting}[language=sh, numbers=none]
+sudo dnf install libiio-devel
 \end{lstlisting}
 
 To build the documentation, you will also need LaTeX packages:
