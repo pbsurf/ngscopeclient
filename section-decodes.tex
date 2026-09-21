@@ -1700,6 +1700,55 @@ This filter outputs a digital waveform with the sampling clock recovered from th
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \pagebreak
+\section{Complex FFT}
+\label{filter:complexfft}
+
+Calculates a Fast Fourier Transform of complex I/Q data, such as the output of a software defined radio, and displays
+the log magnitude response.
+
+This is the complex input equivalent of the \hyperref[filter:fft]{FFT} filter. Because the input is complex, the
+spectrum is two-sided: the output has as many points as the input and covers the entire sample rate, from half the
+sample rate below the center frequency to half above it. The horizontal axis of the output is absolute frequency.
+
+The window functions and peak detection work the same way as for the FFT filter, and the amplitude scaling is the same
+as the \hyperref[filter:complexspectrogram]{Complex Spectrogram}, so the two show the same level for the same signal.
+
+\subsection{Inputs}
+
+\begin{tabularx}{16cm}{llX}
+\thickhline
+\textbf{Signal name} & \textbf{Type} & \textbf{Description} \\
+\thickhline
+I & Analog & Real part of input signal\\
+\thinhline
+Q & Analog & Imaginary part of input signal\\
+\thinhline
+center & Analog scalar & Frequency that the zero point of the complex waveform is at\\
+\thickhline
+\end{tabularx}
+
+I and Q must have the same sample rate.
+
+\subsection{Parameters}
+
+\begin{tabularx}{16cm}{llX}
+\thickhline
+\textbf{Parameter name} & \textbf{Type} & \textbf{Description} \\
+\thickhline
+Number of Peaks & Int & Maximum number of peaks to report\\
+\thinhline
+Peak Window & Int & Minimum spacing between two peaks for them to be reported separately\\
+\thinhline
+Window & Enum & FFT window function\\
+\thickhline
+\end{tabularx}
+
+\subsection{Output Signal}
+
+This filter outputs an analog waveform of power in dBm versus frequency.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\pagebreak
 \section{Complex Import}
 
 Loads waveform data from a raw binary file containing I/Q samples in one of several formats. Regardless of sample
@@ -1758,6 +1807,7 @@ This filter outputs two streams named ``I" and ``Q" containing the I/Q waveform 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \pagebreak
 \section{Complex Spectrogram}
+\label{filter:complexspectrogram}
 
 Plots a spectrogram of complex I/Q data.
 
