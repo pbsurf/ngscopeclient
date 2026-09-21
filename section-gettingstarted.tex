@@ -241,6 +241,11 @@ make -j4
 
 \end{enumerate}
 
+In numeric input boxes such as the center frequency, the up and down arrow keys increase or decrease the digit to the
+left of the cursor, applying the new value immediately. If the cursor is past the end of the number, for example after
+the space in ``2.4 GHz'', another decimal place is added and that digit is stepped. If you would rather use the arrow keys to move between
+input boxes, add \texttt{-DNUMERIC\_INPUT\_ARROW\_STEP=OFF} to the cmake command line.
+
 \subsection{macOS}
 \begin{enumerate}
 
