@@ -28,7 +28,7 @@ libscopehal core and the GPL-licensed UHD API.
 \thickhline
 \textbf{Device Family} & \textbf{Driver} & \textbf{Transport} & \textbf{Notes} \\
 \thickhline
-ADALM-PLUTO, other AD9361/AD9363/AD9364 SDRs & iio & iio & Receive only \\
+ADALM-PLUTO, other AD9361/AD9363/AD9364 SDRs & iio & iio & Receive, and transmit of tones from the DDS \\
 \thickhline
 \end{tabularx}
 
@@ -48,6 +48,17 @@ configured separately, and should be at least as wide as the span. The limits fo
 (the AD9363 in a stock PlutoSDR cannot tune below 325 MHz, for example, while an AD9361 or a PlutoSDR with unlocked
 firmware can), so values you enter are limited to what the radio supports.
 
+Radios with the usual DDS core in the FPGA (the stock firmware of the PlutoSDR and similar radios) can also transmit.
+Each transmit path shows up in the stream browser as a channel (TX1, and TX2 on radios with two transmit paths) after
+the receive channels, and can generate two tones. Each tone has an on/off switch, a frequency and an amplitude. The
+frequency is relative to the transmit local oscillator (LO), so negative frequencies are below the LO, and can be up to
+half of the sample rate either side of it. The amplitude is a percentage of the full scale of the DAC, so keep the sum
+of the amplitudes of both tones at or below 100\% to avoid clipping. The transmit LO frequency, which is shared by all
+transmit paths and is independent of the receive LO, is the TX LO setting in the frequency section of the instrument.
+These settings are saved in sessions. The transmitter is not turned off when ngscopeclient disconnects.
+The tone amplitudes are not the output power, which also depends on the transmit attenuation of the radio (currently
+not adjustable from ngscopeclient).
+
 The receiver gain is in the Input section of the channel properties. The gain mode selects between manual gain and
 the radio's automatic gain control (AGC) modes. The gain can only be set by hand in manual mode. A radio that has just
 powered up is normally running AGC, and ngscopeclient leaves that alone until you change it. The gain mode and gain
@@ -55,13 +66,14 @@ are saved in sessions along with the other settings.
 
 Some things to be aware of:
 \begin{itemize}
-\item Only receive is supported.
+\item Transmit is limited to tones from the DDS. Arbitrary waveforms cannot be transmitted.
 \item Data is captured in blocks of the selected memory depth, so consecutive acquisitions are not gap free.
 \item The link to the radio limits the usable sample rate. Over USB 2.0 the higher rates will not keep up.
 \end{itemize}
 
 For development and testing without hardware, use the transport path \texttt{mock:} (a simulated single-channel
-AD9363) or \texttt{mock:ad9361} (two channels). The simulated radio receives a few fixed RF tones in the 433~MHz,
+AD9363) or \texttt{mock:ad9361} (two channels). Transmit settings are accepted by the simulated radio, but nothing
+is transmitted. The simulated radio receives a few fixed RF tones in the 433~MHz,
 915~MHz and 2.4~GHz bands, which move around as you retune it. In manual gain mode the simulated signal gets stronger
 and weaker as you change the gain.
 
