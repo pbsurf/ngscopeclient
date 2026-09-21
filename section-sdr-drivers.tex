@@ -56,8 +56,8 @@ half of the sample rate either side of it. The amplitude is a percentage of the 
 of the amplitudes of both tones at or below 100\% to avoid clipping. The transmit LO frequency, which is shared by all
 transmit paths and is independent of the receive LO, is the TX LO setting in the frequency section of the instrument.
 These settings are saved in sessions. The transmitter is not turned off when ngscopeclient disconnects.
-The tone amplitudes are not the output power, which also depends on the transmit attenuation of the radio (currently
-not adjustable from ngscopeclient).
+The tone amplitudes are not the output power, which also depends on the attenuation of the transmit path. This is the
+Attenuation setting of the transmit channel, in dB (0 dB is the most output power), and applies to both tones.
 
 The receiver gain is in the Input section of the channel properties. The gain mode selects between manual gain and
 the radio's automatic gain control (AGC) modes. The gain can only be set by hand in manual mode. A radio that has just
