@@ -752,10 +752,22 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
             ImVec2 mouse_pos((float)event->motion.x, (float)event->motion.y);
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
-                int window_x, window_y;
-                SDL_GetWindowPosition(SDL_GetWindowFromID(event->motion.windowID), &window_x, &window_y);
-                mouse_pos.x += window_x;
-                mouse_pos.y += window_y;
+                // While a button is held we may be dragging the very window the event is relative to. SDL's cached window position
+                // lags behind the real one (X11 updates it asynchronously), so window-relative + cached position oscillates and makes
+                // dragged viewports jitter. Query the absolute cursor position instead.
+                if (bd->MouseCanUseGlobalState && bd->MouseButtonsDown != 0 && !SDL_GetRelativeMouseMode())
+                {
+                    int mouse_x, mouse_y;
+                    SDL_GetGlobalMouseState(&mouse_x, &mouse_y);
+                    mouse_pos = ImVec2((float)mouse_x, (float)mouse_y);
+                }
+                else
+                {
+                    int window_x, window_y;
+                    SDL_GetWindowPosition(SDL_GetWindowFromID(event->motion.windowID), &window_x, &window_y);
+                    mouse_pos.x += window_x;
+                    mouse_pos.y += window_y;
+                }
             }
             io.AddMouseSourceEvent(event->motion.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
             io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
@@ -1520,6 +1532,8 @@ static void ImGui_ImplSDL2_CreateWindow(ImGuiViewport* viewport)
 #if !defined(_WIN32)
     // See SDL hack in ImGui_ImplSDL2_ShowWindow().
     sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon) ? SDL_WINDOW_SKIP_TASKBAR : 0;
+    // Skip-taskbar alone leaves an X11 window in the window switcher (e.g. KDE Alt+Tab); a utility window type keeps it out.
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon) ? SDL_WINDOW_UTILITY : 0;
 #endif
 #if SDL_HAS_ALWAYS_ON_TOP
     sdl_flags |= (viewport->Flags & ImGuiViewportFlags_TopMost) ? SDL_WINDOW_ALWAYS_ON_TOP : 0;
