@@ -1540,6 +1540,12 @@ static void ImGui_ImplSDL2_CreateWindow(ImGuiViewport* viewport)
 #endif
     vd->Window = SDL_CreateWindow("No Title Yet", (int)viewport->Pos.x, (int)viewport->Pos.y, (int)viewport->Size.x, (int)viewport->Size.y, sdl_flags);
     vd->WindowOwned = true;
+#if !defined(_WIN32)
+    // Make windows without a taskbar icon transient for the main window (WM_TRANSIENT_FOR on X11, xdg parent on Wayland),
+    // so the window manager raises and minimizes them together with it.
+    if (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon)
+        SDL_SetWindowModalFor(vd->Window, bd->Window);
+#endif
     if (use_opengl)
     {
         vd->GLContext = SDL_GL_CreateContext(vd->Window);
@@ -1591,6 +1597,8 @@ static void ImGui_ImplSDL2_ShowWindow(ImGuiViewport* viewport)
         ex_style &= ~WS_EX_APPWINDOW;
         ex_style |= WS_EX_TOOLWINDOW;
         ::SetWindowLong(hwnd, GWL_EXSTYLE, ex_style);
+        // Owned windows stay above their owner and are minimized/restored with it
+        ::SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, (LONG_PTR)ImGui::GetMainViewport()->PlatformHandleRaw);
     }
 #endif
 
