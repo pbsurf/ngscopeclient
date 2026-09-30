@@ -204,6 +204,9 @@ struct ImGui_ImplSDL2_Data
     bool                    TouchMultiActive;               // Set when a second finger goes down, cleared when all fingers are up
     bool                    PinchHorizontal;                // Orientation of the fingers when the pinch started
     float                   PinchLastDistance;
+    ImVec2                  PinchLastMidpoint;              // In window coordinates
+    ImVec2                  PinchPanAccum;                  // Midpoint movement since the start of the frame
+    ImVec2                  PinchPanDelta;                  // Midpoint movement during the last frame, see ImGui_ImplSDL2_GetTouchPanDelta()
     bool                    PinchPosPending;                // Pinch mouse position/wheel are accumulated here and sent once per frame, see ImGui_ImplSDL2_PinchFlush()
     ImVec2                  PinchPendingPos;                // In mouse coordinates
     ImVec2                  PinchPendingWheel;
@@ -443,6 +446,7 @@ static ImGuiViewport* ImGui_ImplSDL2_GetViewportForWindowID(Uint32 window_id)
 //   - the change in finger distance as mouse wheel movement, on the horizontal wheel axis if the fingers were placed
 //     more horizontally than vertically when the pinch started, otherwise on the vertical wheel axis.
 //     The axis is locked for the duration of the pinch so it can't flip back and forth when the fingers pass near 45 degrees.
+//   - the movement of that midpoint, as a pan gesture the application can query with ImGui_ImplSDL2_GetTouchPanDelta()
 // Positive wheel values mean fingers spreading apart (zoom in). Each wheel step corresponds to a zoom factor of PINCH_ZOOM_STEP_FACTOR,
 // matching the per-step zoom applied by the application, so the content scales 1:1 with the finger spread.
 // These events are sent with ImGuiMouseSource_TouchScreen so the application can tell them apart from real scrolling.
@@ -603,23 +607,32 @@ static void ImGui_ImplSDL2_PinchUpdate(ImGui_ImplSDL2_Data* bd, bool restart)
     float dy = f1.Pos.y - f0.Pos.y;
     float distance = sqrtf(dx * dx + dy * dy);
 
+    ImVec2 midpoint((f0.Pos.x + f1.Pos.x) * 0.5f, (f0.Pos.y + f1.Pos.y) * 0.5f);
     bd->PinchPosPending = true;
-    bd->PinchPendingPos = ImGui_ImplSDL2_WindowToMousePos(ImVec2((f0.Pos.x + f1.Pos.x) * 0.5f, (f0.Pos.y + f1.Pos.y) * 0.5f), f0.WindowID);
+    bd->PinchPendingPos = ImGui_ImplSDL2_WindowToMousePos(midpoint, f0.WindowID);
 
     if (restart)
     {
         bd->PinchHorizontal = fabsf(dx) >= fabsf(dy);
         TOUCH_LOG("pinch begin: fingers %lld,%lld distance=%.1f axis=%s\n", (long long)f0.Id, (long long)f1.Id, distance, bd->PinchHorizontal ? "horizontal" : "vertical");
     }
-    else if (distance > 0.0f && bd->PinchLastDistance > 0.0f)
+    else
     {
-        float wheel = logf(distance / bd->PinchLastDistance) / logf(PINCH_ZOOM_STEP_FACTOR);
-        if (bd->PinchHorizontal)
-            bd->PinchPendingWheel.x += wheel;
-        else
-            bd->PinchPendingWheel.y += wheel;
+        if (distance > 0.0f && bd->PinchLastDistance > 0.0f)
+        {
+            float wheel = logf(distance / bd->PinchLastDistance) / logf(PINCH_ZOOM_STEP_FACTOR);
+            if (bd->PinchHorizontal)
+                bd->PinchPendingWheel.x += wheel;
+            else
+                bd->PinchPendingWheel.y += wheel;
+        }
+
+        // Only movement of the same two fingers counts as panning, not the midpoint jumping when the fingers change
+        bd->PinchPanAccum.x += midpoint.x - bd->PinchLastMidpoint.x;
+        bd->PinchPanAccum.y += midpoint.y - bd->PinchLastMidpoint.y;
     }
     bd->PinchLastDistance = distance;
+    bd->PinchLastMidpoint = midpoint;
 }
 
 static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger)
@@ -1437,6 +1450,14 @@ static void ImGui_ImplSDL2_GetWindowSizeAndFramebufferScale(SDL_Window* window, 
         *out_framebuffer_scale = (w > 0 && h > 0) ? ImVec2((float)display_w / (float)w, (float)display_h / (float)h) : ImVec2(1.0f, 1.0f);
 }
 
+// Movement of the midpoint between the first two fingers during the last frame, while two or more fingers are down on a touchscreen.
+// Zero otherwise. Applications can use it to pan along with pinch zoom.
+ImVec2 ImGui_ImplSDL2_GetTouchPanDelta()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    return bd ? bd->PinchPanDelta : ImVec2(0.0f, 0.0f);
+}
+
 void ImGui_ImplSDL2_NewFrame()
 {
     ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
@@ -1445,6 +1466,8 @@ void ImGui_ImplSDL2_NewFrame()
 
     ImGui_ImplSDL2_PinchFlush(bd, io);
     ImGui_ImplSDL2_TouchUpdate(bd, io);
+    bd->PinchPanDelta = bd->PinchPanAccum;
+    bd->PinchPanAccum = ImVec2(0.0f, 0.0f);
 
     // Setup main viewport size (every frame to accommodate for window resizing)
     ImGui_ImplSDL2_GetWindowSizeAndFramebufferScale(bd->Window, bd->Renderer, &io.DisplaySize, &io.DisplayFramebufferScale);
