@@ -11030,6 +11030,10 @@ void ImGui::UpdateMouseWheel()
     if (g.IO.KeyCtrl)
         return;
 
+    // Touchscreen wheel events are pinch gestures (see imgui_impl_sdl2.cpp), not scrolling. Items may still read them from io.MouseWheel.
+    if (g.IO.MouseSource == ImGuiMouseSource_TouchScreen)
+        return;
+
     // Mouse wheel scrolling
     // Read about io.MouseWheelRequestAxisSwap and its issue on Mac+Emscripten in UpdateMouseInputs()
     if (g.IO.MouseWheelRequestAxisSwap)
