@@ -874,6 +874,8 @@ struct NavigateAction final: EditorAction
     void SetViewRect(const ImRect& rect);
     ImRect GetViewRect() const;
 
+    void PanAndZoom(const ImVec2& screenDelta, float zoomFactor, const ImVec2& zoomCenter);
+
 private:
     ImGuiEx::Canvas&   m_Canvas;
     ImVec2             m_WindowScreenPos;
@@ -1092,6 +1094,10 @@ struct CreateItemAction final : EditorAction
     bool      m_IsActive;
     Pin*      m_DraggedPin;
 
+    bool      m_ClickMode;              // Link was started by clicking a pin instead of dragging from it, and is completed by a second click
+    bool      m_ClickPressed;           // Click mode: mouse button was pressed (in the editor) since the link was started
+    int       m_ClickModeEndFrame;      // Frame in which click mode last ended, so the click that ended it doesn't start another link
+
     int       m_LastChannel = -1;
 
 
@@ -1106,7 +1112,7 @@ struct CreateItemAction final : EditorAction
 
     virtual void ShowMetrics() override final;
 
-    virtual bool IsDragging() override final { return m_IsActive; }
+    virtual bool IsDragging() override final { return m_IsActive && !m_ClickMode; }
 
     virtual CreateItemAction* AsCreateItem() override final { return this; }
 
@@ -1129,6 +1135,9 @@ private:
     void DropPin(Pin* endPin);
     void DropNode();
     void DropNothing();
+
+    bool ProcessClickMode(const Control& control);
+    void DrawCandidateLink(const Control& control);
 };
 
 struct DeleteItemsAction final: EditorAction
@@ -1442,6 +1451,11 @@ struct EditorContext
     {
         auto zoomMode = zoomIn ? NavigateAction::ZoomMode::WithMargin : NavigateAction::ZoomMode::None;
         m_NavigateAction.NavigateTo(bounds, zoomMode, duration);
+    }
+
+    void PanAndZoom(const ImVec2& screenDelta, float zoomFactor, const ImVec2& zoomCenter)
+    {
+        m_NavigateAction.PanAndZoom(screenDelta, zoomFactor, zoomCenter);
     }
 
     void RegisterAnimation(Animation* animation);

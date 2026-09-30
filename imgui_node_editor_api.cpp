@@ -583,6 +583,11 @@ void ax::NodeEditor::NavigateToSelection(bool zoomIn, float duration)
     s_Editor->NavigateTo(s_Editor->GetSelectionBounds(), zoomIn, duration);
 }
 
+void ax::NodeEditor::PanAndZoom(const ImVec2& screenDelta, float zoomFactor, const ImVec2& zoomCenter)
+{
+    s_Editor->PanAndZoom(screenDelta, zoomFactor, zoomCenter);
+}
+
 bool ax::NodeEditor::ShowNodeContextMenu(NodeId* nodeId)
 {
     return s_Editor->GetContextMenu().ShowNodeContextMenu(nodeId);

@@ -389,6 +389,12 @@ IMGUI_NODE_EDITOR_API int BreakLinks(PinId pinId); // Break all links connected 
 IMGUI_NODE_EDITOR_API void NavigateToContent(float duration = -1);
 IMGUI_NODE_EDITOR_API void NavigateToSelection(bool zoomIn = false, float duration = -1);
 
+// Pans the view by screenDelta and zooms it by zoomFactor around zoomCenter (both in screen coordinates),
+// immediately and without animation. Intended for touchscreen gestures: call before Begin(), with the
+// finger movement since the last frame. Mouse wheel events from a touchscreen (ImGuiMouseSource_TouchScreen)
+// are ignored by the editor, as they are expected to be pinch gestures handled this way.
+IMGUI_NODE_EDITOR_API void PanAndZoom(const ImVec2& screenDelta, float zoomFactor, const ImVec2& zoomCenter);
+
 IMGUI_NODE_EDITOR_API bool ShowNodeContextMenu(NodeId* nodeId);
 IMGUI_NODE_EDITOR_API bool ShowPinContextMenu(PinId* pinId);
 IMGUI_NODE_EDITOR_API bool ShowLinkContextMenu(LinkId* linkId);

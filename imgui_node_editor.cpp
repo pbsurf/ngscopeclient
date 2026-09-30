@@ -3470,6 +3470,10 @@ bool ed::NavigateAction::HandleZoom(const Control& control)
     if (!io.MouseWheel || (!allowOffscreen && !Editor->IsHoveredWithoutOverlapp()))// && !ImGui::IsAnyItemActive())
         return false;
 
+    // Touchscreen wheel events are pinch gestures, which the application handles with PanAndZoom()
+    if (io.MouseSource == ImGuiMouseSource_TouchScreen)
+        return false;
+
     auto savedScroll = m_Scroll;
     auto savedZoom   = m_Zoom;
 
@@ -3650,6 +3654,22 @@ void ed::NavigateAction::SetViewRect(const ImRect& rect)
 ImRect ed::NavigateAction::GetViewRect() const
 {
     return m_Canvas.CalcViewRect(GetView());
+}
+
+void ed::NavigateAction::PanAndZoom(const ImVec2& screenDelta, float zoomFactor, const ImVec2& zoomCenter)
+{
+    m_Animation.Stop();
+
+    // Zoom so the canvas point under zoomCenter stays there, then move everything by screenDelta
+    auto oldView   = GetView();
+    auto canvasPos = m_Canvas.ToLocal(zoomCenter, oldView);
+    m_Zoom = ImClamp(m_Zoom * zoomFactor, m_ZoomLevels[0], m_ZoomLevels[m_ZoomLevelCount - 1]);
+    auto newPos    = m_Canvas.FromLocal(canvasPos, GetView());
+
+    m_Scroll      = m_Scroll + newPos - zoomCenter - screenDelta;
+    m_VisibleRect = GetViewRect();
+
+    Editor->MakeDirty(SaveReasonFlags::Navigation);
 }
 
 float ed::NavigateAction::GetNextZoom(float steps)
@@ -4624,6 +4644,10 @@ ed::CreateItemAction::CreateItemAction(EditorContext* editor):
     m_IsActive(false),
     m_DraggedPin(nullptr),
 
+    m_ClickMode(false),
+    m_ClickPressed(false),
+    m_ClickModeEndFrame(-1),
+
     m_IsInGlobalSpace(false)
 {
 }
@@ -4635,9 +4659,24 @@ ed::EditorAction::AcceptResult ed::CreateItemAction::Accept(const Control& contr
     if (m_IsActive)
         return EditorAction::False;
 
-    if (control.ActivePin && ImGui::IsMouseDragging(Editor->GetConfig().DragButtonIndex, 1))
+    const auto dragButton = Editor->GetConfig().DragButtonIndex;
+
+    if (control.ActivePin && ImGui::IsMouseDragging(dragButton, 1))
     {
         m_DraggedPin = control.ActivePin;
+        m_ClickMode  = false;
+        DragStart(m_DraggedPin);
+
+        Editor->ClearSelection();
+    }
+    else if (control.ClickedPin && ImGui::IsMouseReleased(dragButton) && !ImGui::IsMouseDragPastThreshold(dragButton) &&
+        ImGui::GetFrameCount() != m_ClickModeEndFrame && Editor->CanAcceptUserInput())
+    {
+        // Clicking (or tapping) a pin without dragging starts a link which is completed by clicking the other end,
+        // or the background to create a node. Easier than dragging on a touchscreen.
+        m_DraggedPin   = control.ClickedPin;
+        m_ClickMode    = true;
+        m_ClickPressed = false;
         DragStart(m_DraggedPin);
 
         Editor->ClearSelection();
@@ -4661,40 +4700,11 @@ bool ed::CreateItemAction::Process(const Control& control)
     if (!m_IsActive)
         return false;
 
+    if (m_ClickMode)
+        return ProcessClickMode(control);
+
     if (m_DraggedPin && control.ActivePin == m_DraggedPin && (m_CurrentStage == Possible))
-    {
-        const auto draggingFromSource = (m_DraggedPin->m_Kind == PinKind::Output);
-
-        ed::Pin cursorPin(Editor, 0, draggingFromSource ? PinKind::Input : PinKind::Output);
-        cursorPin.m_Pivot    = ImRect(ImGui::GetMousePos(), ImGui::GetMousePos());
-        cursorPin.m_Dir      = -m_DraggedPin->m_Dir;
-        cursorPin.m_Strength =  m_DraggedPin->m_Strength;
-
-        ed::Link candidate(Editor, 0);
-        candidate.m_Color    = m_LinkColor;
-        candidate.m_StartPin = draggingFromSource ? m_DraggedPin : &cursorPin;
-        candidate.m_EndPin   = draggingFromSource ? &cursorPin : m_DraggedPin;
-
-        ed::Pin*& freePin  = draggingFromSource ? candidate.m_EndPin : candidate.m_StartPin;
-
-        if (control.HotPin)
-        {
-            DropPin(control.HotPin);
-
-            if (m_UserAction == UserAccept)
-                freePin = control.HotPin;
-        }
-        else if (control.BackgroundHot)
-            DropNode();
-        else
-            DropNothing();
-
-        auto drawList = Editor->GetDrawList();
-        drawList->ChannelsSetCurrent(c_LinkChannel_NewLink);
-
-        candidate.UpdateEndpoints();
-        candidate.Draw(drawList, m_LinkColor, m_LinkThickness);
-    }
+        DrawCandidateLink(control);
     else if (m_CurrentStage == Possible || !control.ActivePin)
     {
         if (!Editor->CanAcceptUserInput())
@@ -4708,6 +4718,81 @@ bool ed::CreateItemAction::Process(const Control& control)
     }
 
     return m_IsActive;
+}
+
+bool ed::CreateItemAction::ProcessClickMode(const Control& control)
+{
+    const auto dragButton = Editor->GetConfig().DragButtonIndex;
+
+    // Escape, a click outside the editor, or the starting pin going away abandons the link. So does clicking
+    // anything that isn't a valid target, e.g. the starting pin again, since the user code won't accept it.
+    bool cancel = (m_CurrentStage != Possible) || !m_DraggedPin->m_IsLive || ImGui::IsKeyPressed(ImGuiKey_Escape);
+
+    if (ImGui::IsMouseClicked(dragButton))
+    {
+        if (Editor->CanAcceptUserInput())
+            m_ClickPressed = true;
+        else
+            cancel = true;
+    }
+
+    // The link is completed (or not, if the user code rejected the target) when the second click is released
+    if (cancel || (m_ClickPressed && ImGui::IsMouseReleased(dragButton)))
+    {
+        if (cancel || !Editor->CanAcceptUserInput())
+            m_UserAction = Unknown;
+
+        DragEnd();
+        m_IsActive          = false;
+        m_ClickMode         = false;
+        m_ClickModeEndFrame = ImGui::GetFrameCount();
+        return false;
+    }
+
+    DrawCandidateLink(control);
+    return true;
+}
+
+void ed::CreateItemAction::DrawCandidateLink(const Control& control)
+{
+    const auto draggingFromSource = (m_DraggedPin->m_Kind == PinKind::Output);
+
+    ed::Pin cursorPin(Editor, 0, draggingFromSource ? PinKind::Input : PinKind::Output);
+    cursorPin.m_Pivot    = ImRect(ImGui::GetMousePos(), ImGui::GetMousePos());
+    cursorPin.m_Dir      = -m_DraggedPin->m_Dir;
+    cursorPin.m_Strength =  m_DraggedPin->m_Strength;
+
+    ed::Link candidate(Editor, 0);
+    candidate.m_Color    = m_LinkColor;
+    candidate.m_StartPin = draggingFromSource ? m_DraggedPin : &cursorPin;
+    candidate.m_EndPin   = draggingFromSource ? &cursorPin : m_DraggedPin;
+
+    ed::Pin*& freePin  = draggingFromSource ? candidate.m_EndPin : candidate.m_StartPin;
+
+    // In click mode the pointer starts out over the pin the link starts from (and stays there on a touchscreen
+    // until the next touch), which isn't a target
+    if (control.HotPin && !(m_ClickMode && control.HotPin == m_DraggedPin))
+    {
+        DropPin(control.HotPin);
+
+        if (m_UserAction == UserAccept)
+            freePin = control.HotPin;
+    }
+    else if (control.BackgroundHot)
+        DropNode();
+    else
+        DropNothing();
+
+    auto drawList = Editor->GetDrawList();
+
+    // Without a button held there is nothing else to show where the link starts
+    if (m_ClickMode)
+        m_DraggedPin->Draw(drawList, Object::Hovered);
+
+    drawList->ChannelsSetCurrent(c_LinkChannel_NewLink);
+
+    candidate.UpdateEndpoints();
+    candidate.Draw(drawList, m_LinkColor, m_LinkThickness);
 }
 
 void ed::CreateItemAction::ShowMetrics()
