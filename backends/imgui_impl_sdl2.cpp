@@ -25,6 +25,7 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
+//  2026-10-01: Inputs: Mouse position is cleared (-FLT_MAX) once all fingers are lifted from a touchscreen, so hover state and tooltips don't stay where the finger was.
 //  2026-09-20: Inputs: Added long press on touchscreens, reported as a right mouse click. A single finger's left click is now sent on release (or once the finger moves, for drags) instead of on touch down.
 //  2026-09-19: Inputs: Added two-finger pinch on touchscreens, reported as mouse position (finger midpoint) + mouse wheel (change in finger distance, on the axis matching finger orientation).
 //  2026-XX-XX: Platform: Added support for multiple windows via the ImGuiPlatformIO interface.
@@ -215,7 +216,8 @@ struct ImGui_ImplSDL2_Data
     ImVec2                  TouchStartPos;                  // Where the single finger went down, in window coordinates
     Uint32                  TouchDownTicks;                 // SDL_GetTicks() when the single finger went down
     SDL_TimerID             TouchLongPressTimer;            // Wakes up the main loop when it's time to check for a long press
-    bool                    TouchWakeNextFrame;             // Queued two-step input (e.g. mouse down then up) that needs another frame to be processed
+    int                     TouchWakeFrames;                // Number of further frames needed to process queued multi-step input (e.g. mouse down then up)
+    bool                    TouchClearPosPending;           // All fingers are up: move the mouse away once the rest of the touch input has been sent
 
     // Gamepad handling
     ImVector<SDL_GameController*> Gamepads;
@@ -447,6 +449,7 @@ static ImGuiViewport* ImGui_ImplSDL2_GetViewportForWindowID(Uint32 window_id)
 //     more horizontally than vertically when the pinch started, otherwise on the vertical wheel axis.
 //     The axis is locked for the duration of the pinch so it can't flip back and forth when the fingers pass near 45 degrees.
 //   - the movement of that midpoint, as a pan gesture the application can query with ImGui_ImplSDL2_GetTouchPanDelta()
+// - Once all fingers are lifted, and the clicks/wheel movement they made have been processed, the mouse position is cleared (a finger has no hover).
 // Positive wheel values mean fingers spreading apart (zoom in). Each wheel step corresponds to a zoom factor of PINCH_ZOOM_STEP_FACTOR,
 // matching the per-step zoom applied by the application, so the content scales 1:1 with the finger spread.
 // These events are sent with ImGuiMouseSource_TouchScreen so the application can tell them apart from real scrolling.
@@ -545,6 +548,13 @@ static void ImGui_ImplSDL2_TouchCancelSingle(ImGui_ImplSDL2_Data* bd, ImGuiIO& i
     bd->TouchState = ImGui_ImplSDL2_TouchState_None;
 }
 
+// Requests at least this many more frames, to process queued multi-step input
+static void ImGui_ImplSDL2_TouchWakeFrames(ImGui_ImplSDL2_Data* bd, int frames)
+{
+    if (bd->TouchWakeFrames < frames)
+        bd->TouchWakeFrames = frames;
+}
+
 // Called every frame: turns a finger that has been held in place into a right click, and requests a frame for any two-step input queued since the last one.
 // Dear ImGui only applies one change per mouse button per frame, so e.g. a press and release queued together need two frames.
 static void ImGui_ImplSDL2_TouchUpdate(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
@@ -558,12 +568,25 @@ static void ImGui_ImplSDL2_TouchUpdate(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
         io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
         io.AddMouseButtonEvent(1, true);
         io.AddMouseButtonEvent(1, false);
-        bd->TouchWakeNextFrame = true;
+        ImGui_ImplSDL2_TouchWakeFrames(bd, 1);
     }
 
-    if (bd->TouchWakeNextFrame)
+    // A finger has no hover: once all fingers are up, move the mouse away so hover highlights and tooltips don't stay
+    // where the finger was. Dear ImGui won't apply a mouse move until it has processed the button and wheel events
+    // queued before it, so this doesn't change where those happen. That may take two more frames (e.g. tap: down, up, move).
+    if (bd->TouchClearPosPending && bd->TouchFingers.Size == 0 && !bd->PinchPosPending &&
+        bd->PinchPendingWheel.x == 0.0f && bd->PinchPendingWheel.y == 0.0f)
     {
-        bd->TouchWakeNextFrame = false;
+        TOUCH_LOG("clear mouse pos\n");
+        bd->TouchClearPosPending = false;
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        ImGui_ImplSDL2_TouchWakeFrames(bd, 2);
+    }
+
+    if (bd->TouchWakeFrames > 0)
+    {
+        bd->TouchWakeFrames--;
         ImGui_ImplSDL2_WakeMainLoop();
     }
 }
@@ -664,6 +687,8 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
             if (slot >= 0)
                 bd->TouchFingers.erase(bd->TouchFingers.Data + slot); // Finger already down (missed the up event?)
 
+            bd->TouchClearPosPending = false; // Finger is back before the mouse was moved away, so leave it where it is
+
             ImGui_ImplSDL2_TouchFinger f;
             f.Id = finger->fingerId;
             f.WindowID = window_id;
@@ -710,7 +735,7 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
                     bd->TouchState = ImGui_ImplSDL2_TouchState_Dragging;
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
                     ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, f.WindowID));
-                    bd->TouchWakeNextFrame = true; // The move can't be processed in the same frame as the press
+                    ImGui_ImplSDL2_TouchWakeFrames(bd, 1); // The move can't be processed in the same frame as the press
                 }
             }
             else
@@ -730,7 +755,7 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
                     // Tap: the press and release can't be processed in the same frame
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false);
-                    bd->TouchWakeNextFrame = true;
+                    ImGui_ImplSDL2_TouchWakeFrames(bd, 1);
                 }
                 ImGui_ImplSDL2_TouchCancelSingle(bd, io); // Releases the button if dragging
             }
@@ -738,6 +763,8 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
                 bd->TouchMultiActive = false;
             else
                 ImGui_ImplSDL2_PinchUpdate(bd, true); // Pinch continues with the first two remaining fingers, if any
+            if (bd->TouchFingers.Size == 0)
+                bd->TouchClearPosPending = true; // Sent from ImGui_ImplSDL2_TouchUpdate()
             return true;
         }
     }
