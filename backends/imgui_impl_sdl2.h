@@ -45,6 +45,9 @@ IMGUI_IMPL_API bool     ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event);
 // Touchscreen: movement of the midpoint between the first two fingers during the last frame (zero unless two or more fingers are down)
 IMGUI_IMPL_API ImVec2   ImGui_ImplSDL2_GetTouchPanDelta();
 
+// Touchscreen: true if the current (or most recent) single finger touch began as the second tap of a double tap (judged from event timestamps, independent of frame rate)
+IMGUI_IMPL_API bool     ImGui_ImplSDL2_IsTouchDoubleTap();
+
 // DPI-related helpers (optional)
 IMGUI_IMPL_API float    ImGui_ImplSDL2_GetContentScaleForWindow(SDL_Window* window);
 IMGUI_IMPL_API float    ImGui_ImplSDL2_GetContentScaleForDisplay(int display_index);
