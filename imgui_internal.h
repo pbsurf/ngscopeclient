@@ -1566,7 +1566,7 @@ enum ImGuiInputSource : int
 // Using ImVec2() would fail on Clang 'union member 'MousePos' has a non-trivial default constructor'
 struct ImGuiInputEventMousePos      { float PosX, PosY; ImGuiMouseSource MouseSource; };
 struct ImGuiInputEventMouseWheel    { float WheelX, WheelY; ImGuiMouseSource MouseSource; };
-struct ImGuiInputEventMouseButton   { int Button; bool Down; ImGuiMouseSource MouseSource; };
+struct ImGuiInputEventMouseButton   { int Button; bool Down; ImGuiMouseSource MouseSource; double Time; };
 struct ImGuiInputEventMouseViewport { ImGuiID HoveredViewportID; };
 struct ImGuiInputEventKey           { ImGuiKey Key; bool Down; float AnalogValue; };
 struct ImGuiInputEventText          { unsigned int Char; };
@@ -2428,6 +2428,7 @@ struct ImGuiContext
     ImVector<ImGuiInputEvent> InputEventsQueue;                 // Input events which will be trickled/written into IO structure.
     ImVector<ImGuiInputEvent> InputEventsTrail;                 // Past input events processed in NewFrame(). This is to allow domain-specific application to access e.g mouse/pen trail.
     ImGuiMouseSource        InputEventsNextMouseSource;
+    double                  InputEventsMouseButtonTime[ImGuiMouseButton_COUNT]; // Time of the last processed change of each mouse button, from AddMouseButtonEventWithTime() (-1.0 if not given)
     ImU32                   InputEventsNextEventId;
 
     // Windows state

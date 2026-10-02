@@ -25,7 +25,7 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
-//  2026-10-01: Inputs: Added ImGui_ImplSDL2_IsTouchDoubleTap(), double tap detection on touchscreens from SDL event timestamps (independent of frame rate, and of when the deferred left click is sent).
+//  2026-10-01: Inputs: Mouse button presses are sent with their SDL event time (io.AddMouseButtonEventWithTime()), touchscreen presses with the time the finger went down, so double clicks/taps don't depend on frame rate or on when a deferred touch press is sent.
 //  2026-10-01: Inputs: Mouse position is cleared (-FLT_MAX) once all fingers are lifted from a touchscreen, so hover state and tooltips don't stay where the finger was.
 //  2026-09-20: Inputs: Added long press on touchscreens, reported as a right mouse click. A single finger's left click is now sent on release (or once the finger moves, for drags) instead of on touch down.
 //  2026-09-19: Inputs: Added two-finger pinch on touchscreens, reported as mouse position (finger midpoint) + mouse wheel (change in finger distance, on the axis matching finger orientation).
@@ -219,10 +219,8 @@ struct ImGui_ImplSDL2_Data
     SDL_TimerID             TouchLongPressTimer;            // Wakes up the main loop when it's time to check for a long press
     int                     TouchWakeFrames;                // Number of further frames needed to process queued multi-step input (e.g. mouse down then up)
     bool                    TouchClearPosPending;           // All fingers are up: move the mouse away once the rest of the touch input has been sent
-    bool                    TouchLastTapValid;              // The last single finger touch was a tap (no drag or long press), see ImGui_ImplSDL2_IsTouchDoubleTap()
-    Uint32                  TouchLastTapTimestamp;          // SDL event timestamp when that tap's finger was lifted
-    ImVec2                  TouchLastTapPos;                // Where that tap went down, in window coordinates
-    bool                    TouchDoubleTap;                 // The current (or most recent) single finger touch went down soon after, and close to, a tap
+    Uint32                  TouchDownTimestamp;             // SDL event timestamp when the single finger went down, sent as the time of its (deferred) left press
+    Uint32                  FrameTicks;                     // SDL_GetTicks() in the last ImGui_ImplSDL2_NewFrame(), corresponding to ImGui::GetTime() between frames
 
     // Gamepad handling
     ImVector<SDL_GameController*> Gamepads;
@@ -455,10 +453,8 @@ static ImGuiViewport* ImGui_ImplSDL2_GetViewportForWindowID(Uint32 window_id)
 //     The axis is locked for the duration of the pinch so it can't flip back and forth when the fingers pass near 45 degrees.
 //   - the movement of that midpoint, as a pan gesture the application can query with ImGui_ImplSDL2_GetTouchPanDelta()
 // - Once all fingers are lifted, and the clicks/wheel movement they made have been processed, the mouse position is cleared (a finger has no hover).
-// - A single finger going down within DOUBLE_TAP_TIME_MS and DOUBLE_TAP_SLOP of a tap is the second tap of a double tap, which the application can
-//   query with ImGui_ImplSDL2_IsTouchDoubleTap() (e.g. for double tap and drag gestures). It's judged from event timestamps because Dear ImGui's own
-//   double click detection uses frame times between presses, and the deferred press above (on release, or after moving) plus one frame per queued
-//   button change can easily push that past io.MouseDoubleClickTime, especially at low frame rates.
+// - The deferred left press is sent with the time the finger went down (io.AddMouseButtonEventWithTime()), so double taps (including double tap
+//   and drag) are timed between touch downs, not by when the presses were sent or which frames processed them.
 // Positive wheel values mean fingers spreading apart (zoom in). Each wheel step corresponds to a zoom factor of PINCH_ZOOM_STEP_FACTOR,
 // matching the per-step zoom applied by the application, so the content scales 1:1 with the finger spread.
 // These events are sent with ImGuiMouseSource_TouchScreen so the application can tell them apart from real scrolling.
@@ -469,8 +465,6 @@ static ImGuiViewport* ImGui_ImplSDL2_GetViewportForWindowID(Uint32 window_id)
 static const float PINCH_ZOOM_STEP_FACTOR = 1.5f;
 static const Uint32 LONG_PRESS_TIME_MS = 500;
 static const float LONG_PRESS_MOVE_SLOP = 10.0f;    // In window coordinates
-static const Uint32 DOUBLE_TAP_TIME_MS = 300;       // Max time from the first tap's finger up to the second finger down
-static const float DOUBLE_TAP_SLOP = 40.0f;         // Max distance between the two taps, in window coordinates at 100% DPI scale (fingers land tens of pixels apart)
 
 // Define IMGUI_IMPL_SDL2_TOUCH_DEBUG to log touch input to stdout
 #ifdef IMGUI_IMPL_SDL2_TOUCH_DEBUG
@@ -516,10 +510,20 @@ static void ImGui_ImplSDL2_AddTouchMousePos(ImGuiIO& io, ImVec2 mouse_pos)
     io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
 }
 
+// Convert an SDL event timestamp to the Dear ImGui clock (ImGui::GetTime()), for io.AddMouseButtonEventWithTime().
+// Events arrive between frames, after the ImGui::GetTime() of the last frame, which corresponds to FrameTicks.
+static double ImGui_ImplSDL2_EventTime(const ImGui_ImplSDL2_Data* bd, Uint32 timestamp)
+{
+    return ImGui::GetTime() + (double)(Sint32)(timestamp - bd->FrameTicks) / 1000.0;
+}
+
 static void ImGui_ImplSDL2_TouchSetLeftButton(ImGui_ImplSDL2_Data* bd, ImGuiIO& io, bool down)
 {
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-    io.AddMouseButtonEvent(0, down);
+    if (down)
+        io.AddMouseButtonEventWithTime(0, true, ImGui_ImplSDL2_EventTime(bd, bd->TouchDownTimestamp));
+    else
+        io.AddMouseButtonEvent(0, false);
     bd->MouseButtonsDown = down ? (bd->MouseButtonsDown | (1 << 0)) : (bd->MouseButtonsDown & ~(1 << 0));
 }
 
@@ -691,8 +695,7 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
         case SDL_FINGERDOWN:
         {
             Uint32 window_id = finger->windowID ? finger->windowID : bd->WindowID;
-            ImGuiViewport* viewport = ImGui_ImplSDL2_GetViewportForWindowID(window_id);
-            if (viewport == nullptr)
+            if (ImGui_ImplSDL2_GetViewportForWindowID(window_id) == nullptr)
                 return false;
             if (bd->TouchFingers.Size > 0 && bd->TouchFingers[0].WindowID != window_id)
                 return false; // Fingers in different windows can't be combined
@@ -709,24 +712,6 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
 
             if (bd->TouchFingers.Size == 1 && !bd->TouchMultiActive)
             {
-                float tap_dx = f.Pos.x - bd->TouchLastTapPos.x;
-                float tap_dy = f.Pos.y - bd->TouchLastTapPos.y;
-                float tap_slop = DOUBLE_TAP_SLOP * (viewport->DpiScale > 1.0f ? viewport->DpiScale : 1.0f);
-                bd->TouchDoubleTap = bd->TouchLastTapValid &&
-                    (Uint32)(finger->timestamp - bd->TouchLastTapTimestamp) <= DOUBLE_TAP_TIME_MS &&
-                    tap_dx * tap_dx + tap_dy * tap_dy <= tap_slop * tap_slop;
-                if (bd->TouchDoubleTap)
-                    TOUCH_LOG("double tap: %u ms after tap, %.1f px away (max %.1f, DpiScale %.2f)\n",
-                        (unsigned)(finger->timestamp - bd->TouchLastTapTimestamp), sqrtf(tap_dx * tap_dx + tap_dy * tap_dy),
-                        tap_slop, viewport->DpiScale);
-                else if (bd->TouchLastTapValid)
-                    TOUCH_LOG("not a double tap: %u ms after tap (max %u), %.1f px away (max %.1f)\n",
-                        (unsigned)(finger->timestamp - bd->TouchLastTapTimestamp), (unsigned)DOUBLE_TAP_TIME_MS,
-                        sqrtf(tap_dx * tap_dx + tap_dy * tap_dy), tap_slop);
-                else
-                    TOUCH_LOG("not a double tap: previous touch wasn't a tap\n");
-                bd->TouchLastTapValid = false;
-
                 // Single finger: acts as the left mouse button, or a right click if held. We don't yet know which, so don't press anything.
                 ImGui_ImplSDL2_TouchCancelSingle(bd, io);
                 bd->PinchPosPending = false;
@@ -734,14 +719,13 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
                 bd->TouchState = ImGui_ImplSDL2_TouchState_Pending;
                 bd->TouchStartPos = f.Pos;
                 bd->TouchDownTicks = SDL_GetTicks();
+                bd->TouchDownTimestamp = finger->timestamp;
                 bd->TouchLongPressTimer = SDL_AddTimer(LONG_PRESS_TIME_MS, ImGui_ImplSDL2_LongPressTimerCallback, nullptr);
             }
             else if (bd->TouchFingers.Size >= 2)
             {
                 // Second finger down: cancel any click/drag/long press started by the first finger and switch to multitouch
                 ImGui_ImplSDL2_TouchCancelSingle(bd, io);
-                bd->TouchDoubleTap = false;
-                bd->TouchLastTapValid = false;
                 bd->TouchMultiActive = true;
                 ImGui_ImplSDL2_PinchUpdate(bd, true);
             }
@@ -765,7 +749,6 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
                 {
                     ImGui_ImplSDL2_TouchStopLongPressTimer(bd);
                     bd->TouchState = ImGui_ImplSDL2_TouchState_Dragging;
-                    TOUCH_LOG("drag start (left press sent)\n");
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
                     ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, f.WindowID));
                     ImGui_ImplSDL2_TouchWakeFrames(bd, 1); // The move can't be processed in the same frame as the press
@@ -789,12 +772,6 @@ static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
                     ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false);
                     ImGui_ImplSDL2_TouchWakeFrames(bd, 1);
-
-                    // Remember it, in case the next touch makes it a double tap
-                    bd->TouchLastTapValid = true;
-                    bd->TouchLastTapTimestamp = finger->timestamp;
-                    bd->TouchLastTapPos = bd->TouchStartPos;
-                    TOUCH_LOG("tap\n");
                 }
                 ImGui_ImplSDL2_TouchCancelSingle(bd, io); // Releases the button if dragging
             }
@@ -887,7 +864,7 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
             if (mouse_button == -1)
                 break;
             io.AddMouseSourceEvent(event->button.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
-            io.AddMouseButtonEvent(mouse_button, (event->type == SDL_MOUSEBUTTONDOWN));
+            io.AddMouseButtonEventWithTime(mouse_button, (event->type == SDL_MOUSEBUTTONDOWN), ImGui_ImplSDL2_EventTime(bd, event->button.timestamp));
             bd->MouseButtonsDown = (event->type == SDL_MOUSEBUTTONDOWN) ? (bd->MouseButtonsDown | (1 << mouse_button)) : (bd->MouseButtonsDown & ~(1 << mouse_button));
             return true;
         }
@@ -1524,14 +1501,6 @@ ImVec2 ImGui_ImplSDL2_GetTouchPanDelta()
     return bd ? bd->PinchPanDelta : ImVec2(0.0f, 0.0f);
 }
 
-// True if the current (or most recent) single finger touch on a touchscreen began as the second tap of a double tap. Stays set until the next finger
-// goes down, so it still applies when that touch's deferred left click is processed. Check it alongside a left click with io.MouseSource == ImGuiMouseSource_TouchScreen.
-bool ImGui_ImplSDL2_IsTouchDoubleTap()
-{
-    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
-    return bd ? bd->TouchDoubleTap : false;
-}
-
 void ImGui_ImplSDL2_NewFrame()
 {
     ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
@@ -1561,6 +1530,7 @@ void ImGui_ImplSDL2_NewFrame()
         current_time = bd->Time + 1;
     io.DeltaTime = bd->Time > 0 ? (float)((double)(current_time - bd->Time) / (double)frequency) : (float)(1.0f / 60.0f);
     bd->Time = current_time;
+    bd->FrameTicks = SDL_GetTicks();
 
     if (bd->MouseLastLeaveFrame && bd->MouseLastLeaveFrame >= ImGui::GetFrameCount() && bd->MouseButtonsDown == 0)
     {

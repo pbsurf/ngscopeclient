@@ -1979,6 +1979,11 @@ void ImGuiIO::AddMousePosEvent(float x, float y)
 
 void ImGuiIO::AddMouseButtonEvent(int mouse_button, bool down)
 {
+    AddMouseButtonEventWithTime(mouse_button, down, -1.0);
+}
+
+void ImGuiIO::AddMouseButtonEventWithTime(int mouse_button, bool down, double time)
+{
     IM_ASSERT(Ctx != NULL);
     ImGuiContext& g = *Ctx;
     IM_ASSERT(mouse_button >= 0 && mouse_button < ImGuiMouseButton_COUNT);
@@ -2010,7 +2015,7 @@ void ImGuiIO::AddMouseButtonEvent(int mouse_button, bool down)
         {
             IMGUI_DEBUG_LOG_IO("[io] Super+Left Click aliased into Right Click\n");
             MouseCtrlLeftAsRightClick = true;
-            AddMouseButtonEvent(1, true); // This is just quicker to write that passing through, as we need to filter duplicate again.
+            AddMouseButtonEventWithTime(1, true, time); // This is just quicker to write that passing through, as we need to filter duplicate again.
             return;
         }
     }
@@ -2022,6 +2027,7 @@ void ImGuiIO::AddMouseButtonEvent(int mouse_button, bool down)
     e.MouseButton.Button = mouse_button;
     e.MouseButton.Down = down;
     e.MouseButton.MouseSource = g.InputEventsNextMouseSource;
+    e.MouseButton.Time = time;
     g.InputEventsQueue.push_back(e);
 }
 
@@ -4267,6 +4273,8 @@ ImGuiContext::ImGuiContext(ImFontAtlas* shared_font_atlas)
     TestEngine = NULL;
 
     InputEventsNextMouseSource = ImGuiMouseSource_Mouse;
+    for (int n = 0; n < ImGuiMouseButton_COUNT; n++)
+        InputEventsMouseButtonTime[n] = -1.0;
     InputEventsNextEventId = 1;
 
     WindowsActiveCount = 0;
@@ -10884,8 +10892,11 @@ static void ImGui::UpdateMouseInputs()
         io.MouseDownDuration[i] = io.MouseDown[i] ? (io.MouseDownDuration[i] < 0.0f ? 0.0f : io.MouseDownDuration[i] + io.DeltaTime) : -1.0f;
         if (io.MouseClicked[i])
         {
+            // Time the click from when the press happened if the backend told us (see AddMouseButtonEventWithTime()), so double clicks don't depend on frame rate
+            const double event_time = g.InputEventsMouseButtonTime[i];
+            const double click_time = (event_time >= 0.0 && event_time < g.Time) ? event_time : g.Time;
             bool is_repeated_click = false;
-            if ((float)(g.Time - io.MouseClickedTime[i]) < io.MouseDoubleClickTime)
+            if ((float)(click_time - io.MouseClickedTime[i]) < io.MouseDoubleClickTime)
             {
                 ImVec2 delta_from_click_pos = IsMousePosValid(&io.MousePos) ? (io.MousePos - io.MouseClickedPos[i]) : ImVec2(0.0f, 0.0f);
                 const float double_click_max_dist = (io.MouseSource == ImGuiMouseSource_TouchScreen) ? io.MouseDoubleClickMaxDistTouch : io.MouseDoubleClickMaxDist;
@@ -10896,7 +10907,7 @@ static void ImGui::UpdateMouseInputs()
                 io.MouseClickedLastCount[i]++;
             else
                 io.MouseClickedLastCount[i] = 1;
-            io.MouseClickedTime[i] = g.Time;
+            io.MouseClickedTime[i] = click_time;
             io.MouseClickedPos[i] = io.MousePos;
             io.MouseClickedCount[i] = io.MouseClickedLastCount[i];
             io.MouseDragMaxDistanceAbs[i] = ImVec2(0.0f, 0.0f);
@@ -11166,6 +11177,7 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
                 break;
             io.MouseDown[button] = e->MouseButton.Down;
             io.MouseSource = e->MouseButton.MouseSource;
+            g.InputEventsMouseButtonTime[button] = e->MouseButton.Time;
             mouse_button_changed |= (1 << button);
         }
         else if (e->Type == ImGuiInputEventType_MouseWheel)
