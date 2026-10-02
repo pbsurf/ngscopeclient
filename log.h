@@ -193,6 +193,9 @@ public:
 
 protected:
 	FILE		*m_file;
+
+	///@brief Flush after every complete line (so nothing is lost if we crash)
+	bool		m_lineBuffered;
 };
 
 extern std::mutex g_log_mutex;

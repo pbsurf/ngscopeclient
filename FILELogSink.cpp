@@ -46,9 +46,9 @@ using namespace std;
 FILELogSink::FILELogSink(FILE *f, bool line_buffered, Severity min_severity)
 	: LogSink(min_severity)
 	, m_file(f)
+	, m_lineBuffered(line_buffered)
 {
-	if(line_buffered)
-		setvbuf(f, NULL, _IOLBF, 0);
+	//Not setvbuf(_IOLBF): MSVC treats that as full buffering, and rejects a buffer size of zero
 }
 
 FILELogSink::~FILELogSink()
@@ -75,7 +75,7 @@ void FILELogSink::Log(Severity severity, const std::string &msg)
 		m_lastMessageWasNewline = false;
 
 	//Immediately flush log on fatal/error/warning so we can postmortem better in case of crash
-	if(severity <= Severity::WARNING)
+	if( (severity <= Severity::WARNING) || (m_lineBuffered && m_lastMessageWasNewline) )
 		fflush(m_file);
 }
 
@@ -95,6 +95,6 @@ void FILELogSink::Log(Severity severity, const char *format, va_list va)
 		m_lastMessageWasNewline = false;
 
 	//Immediately flush log on fatal/error/warning so we can postmortem better in case of crash
-	if(severity <= Severity::WARNING)
+	if( (severity <= Severity::WARNING) || (m_lineBuffered && m_lastMessageWasNewline) )
 		fflush(m_file);
 }
