@@ -97,11 +97,19 @@ Some things to be aware of:
 \end{itemize}
 
 For development and testing without hardware, use the transport path \texttt{mock:} (a simulated single-channel
-AD9363) or \texttt{mock:ad9361} (two channels). Transmit settings are accepted by the simulated radio, but nothing
-is transmitted. The simulated radio receives a few fixed RF tones in the 433~MHz,
-915~MHz and 2.4~GHz bands, which move around as you retune it. Their levels are defined at 20~dB of receive gain,
-which is where the simulated AGC settles. In manual gain mode the simulated signal gets stronger and weaker as you
-change the gain (so it stays the same once the gain is taken out).
+AD9363) or \texttt{mock:ad9361} (two channels). The simulated radio receives a few fixed RF tones in the 433~MHz,
+915~MHz and 2.4~GHz bands, from -60 to -40~dBm, which move around as you retune it. The simulated AGC settles at
+20~dB of receive gain. In manual gain mode the signal in the samples gets stronger and weaker as you change the gain,
+so it stays the same once the gain is taken out (until the ADC clips, from about 55~dB of gain for the strongest
+tone).
+
+Each transmit path of the simulated radio is connected to the receive path with the same number, as if with a cable
+and a 30~dB attenuator, so the transmitted tones show up in the received signal at the transmit LO plus their
+frequency. A full scale tone with no transmit attenuation is +7~dBm, so the default tone (25\% amplitude, 10~dB
+attenuation) arrives at about -45~dBm. The received signal also has realistic noise: the thermal noise at the input
+(with a 3~dB noise figure) amplified by the receive gain, plus the noise of the ADC. Above about 50~dB of gain (at
+2.5~MS/s, less at higher sample rates) the thermal noise dominates, so the noise floor stays put as the gain
+changes; below that the ADC noise takes over, and the noise floor rises as the gain goes down.
 
 \section{Microphase}
 
