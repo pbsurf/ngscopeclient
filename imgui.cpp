@@ -1709,6 +1709,7 @@ ImGuiIO::ImGuiIO()
     ConfigInputTextCursorBlink = true;
     ConfigInputTextEnterKeepActive = false;
     ConfigDragClickToInputText = false;
+    ConfigDragClickToTweak = false;
     ConfigWindowsResizeFromEdges = true;
     ConfigWindowsMoveFromTitleBarOnly = false;
     ConfigWindowsCopyContentsWithCtrlC = false;
@@ -5898,6 +5899,17 @@ void ImGui::NewFrame()
 
     // Update mouse input state
     UpdateMouseInputs();
+
+    // A mouse click or wheel ends keyboard tweak mode on a Drag/Slider (see io.ConfigDragClickToTweak), so it goes to
+    // whatever is under the mouse. While an item is active, no other item can be hovered. InputText handles clicks itself.
+    if (g.ActiveId != 0 && g.ActiveId != g.InputTextState.ID && (g.ActiveIdSource == ImGuiInputSource_Keyboard || g.ActiveIdSource == ImGuiInputSource_Gamepad))
+    {
+        bool mouse_clicked = (g.IO.MouseWheel != 0.0f || g.IO.MouseWheelH != 0.0f);
+        for (int n = 0; n < ImGuiMouseButton_COUNT; n++)
+            mouse_clicked |= g.IO.MouseClicked[n];
+        if (mouse_clicked)
+            ClearActiveID();
+    }
 
     // Undocking
     // (needs to be before UpdateMouseMovingWindowNewFrame so the window is already offset and following the mouse on the detaching frame)

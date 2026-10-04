@@ -2714,6 +2714,24 @@ static bool TempInputIsClampEnabled(ImGuiSliderFlags flags, ImGuiDataType data_t
     return false;
 }
 
+// Used by DragScalar() and SliderScalar() when io.ConfigDragClickToTweak is set.
+// On a simple click-release (without moving), switch the active item from mouse to keyboard source, so it stays active
+// and the arrow keys tweak it, as if it had been activated with Space. Escape, Enter, Space or clicking elsewhere ends it.
+static bool DragSliderClickToTweak(ImGuiID id, bool hovered)
+{
+    ImGuiContext& g = *GImGui;
+    if (g.ActiveId != id || g.ActiveIdSource != ImGuiInputSource_Mouse || !hovered || !g.IO.MouseReleased[0])
+        return false;
+    if (g.IO.MouseSource == ImGuiMouseSource_TouchScreen)
+        return false;
+    if (ImGui::IsMouseDragPastThreshold(0, g.IO.MouseDragThreshold * DRAG_MOUSE_THRESHOLD_FACTOR))
+        return false;
+    g.ActiveIdSource = ImGuiInputSource_Keyboard;
+    g.NavInputSource = ImGuiInputSource_Keyboard;
+    ImGui::SetNavCursorVisible(true);
+    return true;
+}
+
 // Note: p_data, p_min and p_max are _pointers_ to a memory address holding the data. For a Drag widget, p_min and p_max are optional.
 // Read code of e.g. DragFloat(), DragInt() etc. or examples in 'Demo->Widgets->Data Types' to understand how to use this function directly.
 bool ImGui::DragScalar(const char* label, ImGuiDataType data_type, void* p_data, float v_speed, const void* p_min, const void* p_max, const char* format, ImGuiSliderFlags flags)
@@ -2764,6 +2782,11 @@ bool ImGui::DragScalar(const char* label, ImGuiDataType data_type, void* p_data,
                 g.NavActivateFlags = ImGuiActivateFlags_PreferInput;
                 temp_input_is_active = true;
             }
+
+        // (Optional) simple click (without moving) keeps the Drag active for tweaking with the arrow keys
+        if (g.IO.ConfigDragClickToTweak && !g.IO.ConfigDragClickToInputText && !temp_input_is_active)
+            if (DragSliderClickToTweak(id, hovered))
+                g.DragCurrentAccum = 0.0f;
 
         // Store initial value (not used by main lib but available as a convenience but some mods e.g. to revert)
         if (make_active)
@@ -3368,6 +3391,14 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
             FocusWindow(window);
             g.ActiveIdUsingNavDirMask |= (1 << ImGuiDir_Left) | (1 << ImGuiDir_Right);
         }
+
+        // (Optional) simple click (without moving) keeps the Slider active for tweaking with the arrow keys
+        if (g.IO.ConfigDragClickToTweak && !temp_input_is_active)
+            if (DragSliderClickToTweak(id, hovered))
+            {
+                g.SliderCurrentAccum = 0.0f;
+                g.SliderCurrentAccumDirty = false;
+            }
     }
 
     if (temp_input_is_active)
