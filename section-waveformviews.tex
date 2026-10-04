@@ -82,7 +82,9 @@ properties, or a value the instrument does not support exactly) is shown rounded
 sequence, so the ADC range may end a little inside the edges of the plot.
 
 Channel gain may be configured by scrolling with the mouse wheel (in 1-2-5 steps per division with the fixed divisions
-grid), and offset may be adjusted by dragging the scale with the left mouse button. Pressing the middle mouse button
+grid), and offset may be adjusted by dragging the scale with the left mouse button. While dragging, the offset moves in
+steps of 1/5 of a division (like the minor ticks of a scope graticule), so it stays on round values; hold SHIFT to adjust
+it continuously instead. Pressing the middle mouse button
 (or double-clicking or double-tapping) on the Y axis will auto-scale the vertical gain and offset to show the full span
 of all channels in the view with 5\% of vertical margin.
 
