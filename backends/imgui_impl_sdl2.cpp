@@ -1280,13 +1280,78 @@ float ImGui_ImplSDL2_GetContentScaleForWindow(SDL_Window* window)
 #if defined(SDL_VIDEO_DRIVER_X11) && defined(__linux__)
 // SDL2 on X11 derives DPI from the monitor's physical size (XRandR mm), which ignores the user's desktop scaling
 // setting and fails outright when the size is reported as 0mm (VMs, some KVMs/adapters).
-// GLFW instead uses the Xft.dpi X resource (what desktop environments set for UI scaling). Do the same here.
-// Returns the Xft.dpi value, or 0.0f if it is unavailable.
-static float ImGui_ImplSDL2_GetX11XftDpi()
+// GLFW instead uses the Xft.dpi X resource (what desktop environments set for UI scaling). Do the same here,
+// but first check XSETTINGS: Xfce scales GTK with Gdk/WindowScalingFactor and leaves Xft.dpi unscaled (96),
+// so Xft.dpi alone gives 1.0 there.
+
+// Reads Gdk/WindowScalingFactor, Gdk/UnscaledDPI and Xft/DPI from the XSETTINGS manager (xfsettingsd,
+// gsd-xsettings, ...). Returns the content scale the same way GTK3 computes it (window scale * unscaled DPI / 96),
+// or 0.0f if there is no XSETTINGS manager or it doesn't publish a window scaling factor.
+static float ImGui_ImplSDL2_GetX11XSettingsScale(Display* display)
+{
+    char selection_name[32];
+    snprintf(selection_name, sizeof(selection_name), "_XSETTINGS_S%d", DefaultScreen(display));
+    Window owner = XGetSelectionOwner(display, XInternAtom(display, selection_name, False));
+    if (owner == None)
+        return 0.0f;
+    Atom settings_atom = XInternAtom(display, "_XSETTINGS_SETTINGS", False);
+    Atom type;
+    int format;
+    unsigned long count, remaining;
+    unsigned char* data = nullptr;
+    if (XGetWindowProperty(display, owner, settings_atom, 0, 0x7fffffff, False, settings_atom,
+                           &type, &format, &count, &remaining, &data) != Success || data == nullptr)
+        return 0.0f;
+
+    // Format (XSETTINGS spec): byte-order CARD8, 3 pad, serial CARD32, n-settings CARD32, then per setting:
+    // type CARD8 (0 = int, 1 = string, 2 = color), pad, name-len CARD16, name padded to 4, last-change CARD32, value
+    const bool swap = (data[0] == 1) != (SDL_BYTEORDER == SDL_BIG_ENDIAN);
+    auto card16 = [&](const unsigned char* p) { Uint16 v; memcpy(&v, p, 2); return swap ? SDL_Swap16(v) : v; };
+    auto card32 = [&](const unsigned char* p) { Uint32 v; memcpy(&v, p, 4); return swap ? SDL_Swap32(v) : v; };
+    auto pad4 = [](size_t n) { return (n + 3) & ~(size_t)3; };
+
+    int window_scale = 0, unscaled_dpi = 0, xft_dpi = 0;     // DPI values are in 1/1024ths
+    const unsigned char* end = data + count;
+    const unsigned char* p = data + 12;
+    for (Uint32 n = (count >= 12) ? card32(data + 8) : 0; n > 0 && p + 4 <= end; n--)
+    {
+        int setting_type = p[0];
+        size_t name_len = card16(p + 2);
+        const unsigned char* name = p + 4;
+        p += 4 + pad4(name_len) + 4;
+        size_t value_len = (setting_type == 0) ? 4 : (setting_type == 2) ? 8 : (p + 4 <= end) ? 4 + pad4(card32(p)) : 0;
+        if (value_len == 0 || p + value_len > end)
+            break;
+        if (setting_type == 0)
+        {
+            int value = (int)card32(p);
+            if (name_len == 23 && memcmp(name, "Gdk/WindowScalingFactor", 23) == 0) window_scale = value;
+            else if (name_len == 15 && memcmp(name, "Gdk/UnscaledDPI", 15) == 0)    unscaled_dpi = value;
+            else if (name_len == 7 && memcmp(name, "Xft/DPI", 7) == 0)              xft_dpi = value;
+        }
+        p += value_len;
+    }
+    XFree(data);
+
+    if (window_scale <= 0)
+        return 0.0f;
+    // GNOME publishes Xft/DPI already multiplied by the window scale, plus Gdk/UnscaledDPI; Xfce only Xft/DPI (unscaled)
+    int dpi = (unscaled_dpi > 0) ? unscaled_dpi : xft_dpi;
+    return (dpi > 0) ? window_scale * (dpi / 1024.0f) / 96.0f : (float)window_scale;
+}
+
+// Returns the desktop's content scale from XSETTINGS or the Xft.dpi resource, or 0.0f if neither is available.
+static float ImGui_ImplSDL2_GetX11ContentScale()
 {
     Display* display = XOpenDisplay(nullptr);
     if (display == nullptr)
         return 0.0f;
+    float scale = ImGui_ImplSDL2_GetX11XSettingsScale(display);
+    if (scale > 0.0f)
+    {
+        XCloseDisplay(display);
+        return scale;
+    }
     float dpi = 0.0f;
     if (const char* resources = XResourceManagerString(display))
     {
@@ -1304,7 +1369,7 @@ static float ImGui_ImplSDL2_GetX11XftDpi()
         }
     }
     XCloseDisplay(display);
-    return dpi;
+    return dpi / 96.0f;
 }
 #endif
 
@@ -1318,9 +1383,9 @@ float ImGui_ImplSDL2_GetContentScaleForDisplay(int display_index)
     if (sdl_driver && strcmp(sdl_driver, "x11") == 0)
     {
         // Prefer the desktop's configured scale (matches GLFW behavior), falling back to SDL below
-        const float xft_dpi = ImGui_ImplSDL2_GetX11XftDpi();
-        if (xft_dpi > 0.0f)
-            return (xft_dpi < 96.0f) ? 1.0f : xft_dpi / 96.0f;
+        const float scale = ImGui_ImplSDL2_GetX11ContentScale();
+        if (scale > 0.0f)
+            return (scale < 1.0f) ? 1.0f : scale;
     }
 #endif
 #if SDL_HAS_PER_MONITOR_DPI
