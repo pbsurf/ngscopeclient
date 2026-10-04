@@ -64,6 +64,26 @@ the radio's automatic gain control (AGC) modes. The gain can only be set by hand
 powered up is normally running AGC, and ngscopeclient leaves that alone until you change it. The gain mode and gain
 are saved in sessions along with the other settings.
 
+The receive gain is taken out of the I/Q samples, so the signal level (in the time domain, and on an FFT of it) stays
+the same when the gain changes, including while AGC is moving it. Without calibration the level is only approximate,
+since the gain of the radio varies with frequency and from one radio to another. Two more settings in the Input
+section make it accurate:
+\begin{itemize}
+\item \textbf{External gain} is the gain of anything in front of the input, such as an amplifier or a cable, in dB.
+Use a negative value for loss, for example -20~dB for a 20~dB attenuator. The level is then the one at the input of
+that, rather than at the input of the radio. The vertical range and offset are scaled to match when you change it.
+\item \textbf{Calibration file} is a table of the gain of the radio against frequency. The gain at each frequency is
+how many dB higher than it should the level reads with no calibration, no external gain, and 0~dB receive gain; it is
+interpolated linearly between points, and taken as that of the nearest point outside them. Either a text file with a
+frequency and a gain on each line, separated by a comma, semicolon, tab or spaces (the frequency in Hz, or with a
+unit such as \texttt{2.4 GHz}; lines starting with \texttt{\#} are comments, and a header line is allowed), or a
+Touchstone file with two or more ports, in which case S21 is the gain. The gain is looked up at the receive LO
+frequency, so it corrects the level across the whole tuning range (and each step of a sweep) but not the response
+within one capture.
+\end{itemize}
+The total gain taken out at the current center frequency is shown below these. The external gain and calibration file
+are saved in sessions; the calibration file is reloaded from disk when a session is opened.
+
 Some things to be aware of:
 \begin{itemize}
 \item Transmit is limited to tones from the DDS. Arbitrary waveforms cannot be transmitted.
@@ -74,8 +94,9 @@ Some things to be aware of:
 For development and testing without hardware, use the transport path \texttt{mock:} (a simulated single-channel
 AD9363) or \texttt{mock:ad9361} (two channels). Transmit settings are accepted by the simulated radio, but nothing
 is transmitted. The simulated radio receives a few fixed RF tones in the 433~MHz,
-915~MHz and 2.4~GHz bands, which move around as you retune it. In manual gain mode the simulated signal gets stronger
-and weaker as you change the gain.
+915~MHz and 2.4~GHz bands, which move around as you retune it. Their levels are defined at 20~dB of receive gain,
+which is where the simulated AGC settles. In manual gain mode the simulated signal gets stronger and weaker as you
+change the gain (so it stays the same once the gain is taken out).
 
 \section{Microphase}
 
