@@ -2,7 +2,13 @@
 
 The timeline is displayed at the top of each waveform group and shows the X axis scale for the group. The timeline (and
 all accompanying waveform views in the group) may be zoomed by scrolling with the mouse wheel, or panned by dragging
-with the left mouse button.
+with the left mouse button. Pressing the middle mouse button (or double-clicking or double-tapping) auto-scales the
+group so that the entire waveform is visible.
+
+With the fixed divisions grid (see \hyperref[sec:grid]{Grid}), the timeline is split into a fixed number of
+divisions. The center division is labeled with its time and the others with their offset from it (e.g. ``+200 ns"),
+and the mouse wheel steps the time per division through the 1-2-5 sequence. Auto-scaling rounds the time per division
+up to the next value in the sequence and centers the waveform, leaving some space on either side of it.
 
 Unlike classical oscilloscope user interfaces, there is \emph{no relationship} between the timeline scale or position
 and the duration of the acquisition. It is possible to zoom or scroll beyond the end of the acquisition (displaying

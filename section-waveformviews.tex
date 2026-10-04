@@ -12,7 +12,9 @@ with any other channel.
 \section{Navigation}
 
 Scrolling with the mouse wheel adjusts the horizontal scale of the current waveform group, zooming in or out centered
-on the position of the mouse cursor.
+on the position of the mouse cursor. With the fixed divisions grid (see \hyperref[sec:grid]{Grid}), each step of the
+wheel moves the time per division to the next value in the 1-2-5 sequence (e.g. 100 ns/div, 200 ns/div, 500 ns/div),
+like the timebase knob of an oscilloscope.
 
 %Pressing SHIFT while scrolling moves the view left and right without adjusting zoom. If your mouse has a horizontal
 %scroll feature, this may also be used to pan without zooming.
@@ -21,12 +23,14 @@ on the position of the mouse cursor.
 
 Holding CTRL and dragging with the left mouse button in the plot area draws a box, and zooming to that box both scales
 the horizontal axis of the waveform group and adjusts the gain and offset of the view's Y axis to match. A box that is
-very narrow or very short only zooms the other axis. Pressing ESC while dragging cancels the zoom.
+very narrow or very short only zooms the other axis. Pressing ESC while dragging cancels the zoom. With the fixed
+divisions grid, the scale of each axis is rounded up to the next value in the 1-2-5 sequence, so the box may be shown
+with some space around it.
 
 \section{Plot Area}
 
 The plot area shows the waveform being displayed. The horizontal grid lines line up with the voltage scale markings on
-the Y axis. If the plot area includes Y=0, the grid line for zero is slightly brighter.
+the Y axis. If the plot area includes Y=0, a line is drawn there, slightly brighter than the grid.
 
 The waveform is drawn as a semi-transparent line so that when zoomed out, the density of voltage at various points in
 the graph may be seen as lighter or darker areas. This is referred to as ``intensity grading".
@@ -38,13 +42,55 @@ the graph may be seen as lighter or darker areas. This is referred to as ``inten
 \label{graded-waveform2}
 \end{figure}
 
+\subsection{Grid}
+\label{sec:grid}
+
+The grid can work in one of two ways, chosen with the \emph{Grid mode} setting under \menustyle{Appearance / Graphs}
+in the \hyperref[dlg:preferences]{Preferences} dialog.
+
+In \emph{adaptive} mode (the default), grid lines are placed at round values, such as every 100 mV or every 20 ns.
+As the waveform is zoomed, panned, or offset, the lines move with it, and lines are added or removed to keep a
+reasonable spacing.
+
+In \emph{fixed divisions} mode, the grid stays fixed on the screen, like the graticule of an oscilloscope: the plot is
+split into a set number of divisions horizontally and vertically (10 and 8 by default, set with the \emph{Horizontal
+divisions} and \emph{Vertical divisions} settings), and only the labels change as the waveform is zoomed, panned, or
+offset. On each axis, the center line is labeled with its value and the other lines with their offset from it (e.g.
+``+200 ns", ``-50 mV"), so the scale per division can be read directly from the labels. The offset labels are dimmed, so the
+value at the center stands out.
+
+Center and offset labels are used where the position of the view is often adjusted: on time axes, on the Y axis of
+analog waveforms in volts, amps, or watts, and on the frequency axis of spectra centered on a frequency, such as from
+an SDR (where they show the center frequency and span, as on a heterodyne spectrum analyzer). Other axes label every
+line with its value, for example the Y axis of a spectrum (like the levels on a spectrum analyzer), or the frequency
+axis of an FFT of a real signal, which starts at 0 Hz. If the plot is too small for a
+label on every line, only every second, fifth, tenth... line is labeled.
+
+In fixed divisions mode, the scale of both axes is always kept to the 1-2-5 sequence per division (e.g. 10, 20, 50,
+100 mV/div). The mouse wheel steps through the sequence, and zooming to a box or auto-scaling rounds up to the next
+value in it so that everything requested still fits. Resizing the window keeps the time per division and stretches
+the waveform, rather than showing more or less time. Y axes in units which are not linear values (such as BER on a
+logarithmic scale, or hexadecimal values) always use the adaptive grid.
+
+In either mode, vertical grid lines are only drawn if enabled with the \emph{Vertical grid} setting.
+
 \section{Y Axis Scale}
 
-Each waveform view has its own Y axis scale, which is locked to the ADC range of the instrument.
+Each waveform view has its own Y axis scale, which is locked to the ADC range of the instrument. With the fixed
+divisions grid, a range which is not in the 1-2-5 sequence per division (for example one set in the channel
+properties, or a value the instrument does not support exactly) is shown rounded up to the next value in the
+sequence, so the ADC range may end a little inside the edges of the plot.
 
-Channel gain may be configured by scrolling with the mouse wheel, and offset may be adjusted by dragging the scale with
-the left mouse button. Pressing the middle mouse button (or double-clicking or double-tapping) on the Y axis will
-auto-scale the vertical gain and offset to show the full span of all channels in the view with 5\% of vertical margin.
+Channel gain may be configured by scrolling with the mouse wheel (in 1-2-5 steps per division with the fixed divisions
+grid), and offset may be adjusted by dragging the scale with the left mouse button. Pressing the middle mouse button
+(or double-clicking or double-tapping) on the Y axis will auto-scale the vertical gain and offset to show the full span
+of all channels in the view with 5\% of vertical margin.
+
+Right-clicking on the Y axis shows a menu with these actions:
+\begin{itemize}
+\item \menustyle{Autofit}: auto-scales the vertical gain and offset, as for the middle mouse button.
+\item \menustyle{Reset offset}: sets the offset of all channels in the view to zero, without changing the gain.
+\end{itemize}
 
 If a left-pointing arrow (as seen in Fig. \ref{y-axis}) is visible, one of the channels in the view is selected as a
 trigger source. Click on the arrow and drag up or down to select the trigger level. Some trigger types, such as window
