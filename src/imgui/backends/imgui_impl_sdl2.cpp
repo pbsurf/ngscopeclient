@@ -1,0 +1,1897 @@
+// dear imgui: Platform Backend for SDL2
+// This needs to be used along with a Renderer (e.g. DirectX11, OpenGL3, Vulkan..)
+// (Info: SDL2 is a cross-platform general purpose library for handling windows, inputs, graphics context creation, etc.)
+// (Prefer SDL 2.0.5+ for full feature support.)
+
+// Implemented features:
+//  [X] Platform: Clipboard support.
+//  [X] Platform: Mouse support. Can discriminate Mouse/TouchScreen.
+//  [X] Platform: Keyboard support. Since 1.87 we are using the io.AddKeyEvent() function. Pass ImGuiKey values to all key functions e.g. ImGui::IsKeyPressed(ImGuiKey_Space). [Legacy SDL_SCANCODE_* values are obsolete since 1.87 and not supported since 1.91.5]
+//  [X] Platform: Gamepad support.
+//  [X] Platform: Mouse cursor shape and visibility (ImGuiBackendFlags_HasMouseCursors). Disable with 'io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange'.
+//  [X] Platform: Basic IME support. App needs to call 'SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");' before SDL_CreateWindow()!.
+//  [X] Platform: Multi-viewport support (multiple windows). Enable with 'io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable'.
+// Missing features or Issues:
+//  [ ] Platform: Multi-viewport: Minimized windows seems to break mouse wheel events (at least under Windows).
+//  [ ] Platform: Multi-viewport: Missing ImGuiBackendFlags_HasParentViewport support. The viewport->ParentViewportID field is ignored, and therefore io.ConfigViewportsNoDefaultParent has no effect either.
+
+// You can use unmodified imgui_impl_* files in your project. See examples/ folder for examples of using this.
+// Prefer including the entire imgui/ repository into your project (either as a copy or as a submodule), and only build the backends you need.
+// Learn about Dear ImGui:
+// - FAQ                  https://dearimgui.com/faq
+// - Getting Started      https://dearimgui.com/getting-started
+// - Documentation        https://dearimgui.com/docs (same as your local docs/ folder).
+// - Introduction, links and more at the top of imgui.cpp
+
+// CHANGELOG
+// (minor and older changes stripped away, please see git history for details)
+//  2026-10-01: Inputs: Mouse button presses are sent with their SDL event time (io.AddMouseButtonEventWithTime()), touchscreen presses with the time the finger went down, so double clicks/taps don't depend on frame rate or on when a deferred touch press is sent.
+//  2026-10-01: Inputs: Mouse position is cleared (-FLT_MAX) once all fingers are lifted from a touchscreen, so hover state and tooltips don't stay where the finger was.
+//  2026-09-20: Inputs: Added long press on touchscreens, reported as a right mouse click. A single finger's left click is now sent on release (or once the finger moves, for drags) instead of on touch down.
+//  2026-09-19: Inputs: Added two-finger pinch on touchscreens, reported as mouse position (finger midpoint) + mouse wheel (change in finger distance, on the axis matching finger orientation).
+//  2026-XX-XX: Platform: Added support for multiple windows via the ImGuiPlatformIO interface.
+//  2026-04-16: Made ImGui_ImplSDL2_GetContentScaleForWindow(), ImGui_ImplSDL2_GetContentScaleForDisplay() helpers return a minimum of 1.0f, as some Linux setup seems to report <1.0f value and this breaks scaling border size. (#9369)
+//  2026-03-09: [Docking] Fixed an issue dated 2025/04/09 (1.92 WIP) where a refactor+merge caused ImGuiBackendFlags_HasMouseHoveredViewport to never be set, causing foreign windows to be ignored when deciding of hovered viewport. (#9284)
+//  2026-02-13: Inputs: systems other than X11 are back to starting mouse capture on mouse down (reverts 2025-02-26 change). Only X11 requires waiting for a drag by default (not ideal, but a better default for X11 users). Added ImGui_ImplSDL2_SetMouseCaptureMode() for X11 debugger users. (#3650, #6410, #9235)
+//  2026-01-15: Changed GetClipboardText() handler to return nullptr on error aka clipboard contents is not text. Consistent with other backends. (#9168)
+//  2025-09-24: Skip using the SDL_GetGlobalMouseState() state when one of our window is hovered, as the SDL_MOUSEMOTION data is reliable. Fix macOS notch mouse coordinates issue in fullscreen mode + better perf on X11. (#7919, #7786)
+//  2025-09-18: Call platform_io.ClearPlatformHandlers() on shutdown.
+//  2025-09-15: Content Scales are always reported as 1.0 on Wayland. (#8921)
+//  2025-07-08: Made ImGui_ImplSDL2_GetContentScaleForWindow(), ImGui_ImplSDL2_GetContentScaleForDisplay() helpers return 1.0f on Emscripten and Android platforms, matching macOS logic. (#8742, #8733)
+//  2025-06-11: Added ImGui_ImplSDL2_GetContentScaleForWindow(SDL_Window* window) and ImGui_ImplSDL2_GetContentScaleForDisplay(int display_index) helper to facilitate making DPI-aware apps.
+//  2025-05-15: [Docking] Add Platform_GetWindowFramebufferScale() handler, to allow varying Retina display density on multiple monitors.
+//  2025-04-09: [Docking] Revert update monitors and work areas information every frame. Only do it on Windows. (#8415, #8558)
+//  2025-04-09: Don't attempt to call SDL_CaptureMouse() on drivers where we don't call SDL_GetGlobalMouseState(). (#8561)
+//  2025-03-21: Fill gamepad inputs and set ImGuiBackendFlags_HasGamepad regardless of ImGuiConfigFlags_NavEnableGamepad being set.
+//  2025-03-10: When dealing with OEM keys, use scancodes instead of translated keycodes to choose ImGuiKey values. (#7136, #7201, #7206, #7306, #7670, #7672, #8468)
+//  2025-02-26: Only start SDL_CaptureMouse() when mouse is being dragged, to mitigate issues with e.g. Linux debuggers not claiming capture back. (#6410, #3650)
+//  2025-02-25: [Docking] Revert to use SDL_GetDisplayBounds() for WorkPos/WorkRect if SDL_GetDisplayUsableBounds() failed.
+//  2025-02-24: Avoid calling SDL_GetGlobalMouseState() when mouse is in relative mode.
+//  2025-02-21: [Docking] Update monitors and work areas information every frame, as the later may change regardless of monitor changes. (#8415)
+//  2025-02-18: Added ImGuiMouseCursor_Wait and ImGuiMouseCursor_Progress mouse cursor support.
+//  2025-02-10: Using SDL_OpenURL() in platform_io.Platform_OpenInShellFn handler.
+//  2025-01-20: Made ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_Manual) accept an empty array.
+//  2024-10-24: Emscripten: from SDL 2.30.9, SDL_EVENT_MOUSE_WHEEL event doesn't require dividing by 100.0f.
+//  2024-09-09: use SDL_Vulkan_GetDrawableSize() when available. (#7967, #3190)
+//  2024-08-22: moved some OS/backend related function pointers from ImGuiIO to ImGuiPlatformIO:
+//               - io.GetClipboardTextFn    -> platform_io.Platform_GetClipboardTextFn
+//               - io.SetClipboardTextFn    -> platform_io.Platform_SetClipboardTextFn
+//               - io.PlatformOpenInShellFn -> platform_io.Platform_OpenInShellFn
+//               - io.PlatformSetImeDataFn  -> platform_io.Platform_SetImeDataFn
+//  2024-08-19: Storing SDL's Uint32 WindowID inside ImGuiViewport::PlatformHandle instead of SDL_Window*.
+//  2024-08-19: ImGui_ImplSDL2_ProcessEvent() now ignores events intended for other SDL windows. (#7853)
+//  2024-07-02: Emscripten: Added io.PlatformOpenInShellFn() handler for Emscripten versions.
+//  2024-07-02: Update for io.SetPlatformImeDataFn() -> io.PlatformSetImeDataFn() renaming in main library.
+//  2024-02-14: Inputs: Handle gamepad disconnection. Added ImGui_ImplSDL2_SetGamepadMode().
+//  2023-10-05: Inputs: Added support for extra ImGuiKey values: F13 to F24 function keys, app back/forward keys.
+//  2023-04-06: Inputs: Avoid calling SDL_StartTextInput()/SDL_StopTextInput() as they don't only pertain to IME. It's unclear exactly what their relation is to IME. (#6306)
+//  2023-04-04: Inputs: Added support for io.AddMouseSourceEvent() to discriminate ImGuiMouseSource_Mouse/ImGuiMouseSource_TouchScreen. (#2702)
+//  2023-02-23: Accept SDL_GetPerformanceCounter() not returning a monotonically increasing value. (#6189, #6114, #3644)
+//  2023-02-07: Implement IME handler (io.SetPlatformImeDataFn will call SDL_SetTextInputRect()/SDL_StartTextInput()).
+//  2023-02-07: *BREAKING CHANGE* Renamed this backend file from imgui_impl_sdl.cpp/.h to imgui_impl_sdl2.cpp/.h in prevision for the future release of SDL3.
+//  2023-02-02: Avoid calling SDL_SetCursor() when cursor has not changed, as the function is surprisingly costly on Mac with latest SDL (may be fixed in next SDL version).
+//  2023-02-02: Added support for SDL 2.0.18+ preciseX/preciseY mouse wheel data for smooth scrolling + Scaling X value on Emscripten (bug?). (#4019, #6096)
+//  2023-02-02: Removed SDL_MOUSEWHEEL value clamping, as values seem correct in latest Emscripten. (#4019)
+//  2023-02-01: Flipping SDL_MOUSEWHEEL 'wheel.x' value to match other backends and offer consistent horizontal scrolling direction. (#4019, #6096, #1463)
+//  2022-10-11: Using 'nullptr' instead of 'NULL' as per our switch to C++11.
+//  2022-09-26: Inputs: Disable SDL 2.0.22 new "auto capture" (SDL_HINT_MOUSE_AUTO_CAPTURE) which prevents drag and drop across windows for multi-viewport support + don't capture when drag and dropping. (#5710)
+//  2022-09-26: Inputs: Renamed ImGuiKey_ModXXX introduced in 1.87 to ImGuiMod_XXX (old names still supported).
+//  2022-03-22: Inputs: Fix mouse position issues when dragging outside of boundaries. SDL_CaptureMouse() erroneously still gives out LEAVE events when hovering OS decorations.
+//  2022-03-22: Inputs: Added support for extra mouse buttons (SDL_BUTTON_X1/SDL_BUTTON_X2).
+//  2022-02-04: Added SDL_Renderer* parameter to ImGui_ImplSDL2_InitForSDLRenderer(), so we can use SDL_GetRendererOutputSize() instead of SDL_GL_GetDrawableSize() when bound to a SDL_Renderer.
+//  2022-01-26: Inputs: replaced short-lived io.AddKeyModsEvent() (added two weeks ago) with io.AddKeyEvent() using ImGuiKey_ModXXX flags. Sorry for the confusion.
+//  2021-01-20: Inputs: calling new io.AddKeyAnalogEvent() for gamepad support, instead of writing directly to io.NavInputs[].
+//  2022-01-17: Inputs: calling new io.AddMousePosEvent(), io.AddMouseButtonEvent(), io.AddMouseWheelEvent() API (1.87+).
+//  2022-01-17: Inputs: always update key mods next and before key event (not in NewFrame) to fix input queue with very low framerates.
+//  2022-01-12: Update mouse inputs using SDL_MOUSEMOTION/SDL_WINDOWEVENT_LEAVE + fallback to provide it when focused but not hovered/captured. More standard and will allow us to pass it to future input queue API.
+//  2022-01-12: Maintain our own copy of MouseButtonsDown mask instead of using ImGui::IsAnyMouseDown() which will be obsoleted.
+//  2022-01-10: Inputs: calling new io.AddKeyEvent(), io.AddKeyModsEvent() + io.SetKeyEventNativeData() API (1.87+). Support for full ImGuiKey range.
+//  2021-08-17: Calling io.AddFocusEvent() on SDL_WINDOWEVENT_FOCUS_GAINED/SDL_WINDOWEVENT_FOCUS_LOST.
+//  2021-07-29: Inputs: MousePos is correctly reported when the host platform window is hovered but not focused (using SDL_GetMouseFocus() + SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, requires SDL 2.0.5+)
+//  2021-06:29: *BREAKING CHANGE* Removed 'SDL_Window* window' parameter to ImGui_ImplSDL2_NewFrame() which was unnecessary.
+//  2021-06-29: Reorganized backend to pull data from a single structure to facilitate usage with multiple-contexts (all g_XXXX access changed to bd->XXXX).
+//  2021-03-22: Rework global mouse pos availability check listing supported platforms explicitly, effectively fixing mouse access on Raspberry Pi. (#2837, #3950)
+//  2020-05-25: Misc: Report a zero display-size when window is minimized, to be consistent with other backends.
+//  2020-02-20: Inputs: Fixed mapping for ImGuiKey_KeyPadEnter (using SDL_SCANCODE_KP_ENTER instead of SDL_SCANCODE_RETURN2).
+//  2019-12-17: Inputs: On Wayland, use SDL_GetMouseState (because there is no global mouse state).
+//  2019-12-05: Inputs: Added support for ImGuiMouseCursor_NotAllowed mouse cursor.
+//  2019-07-21: Inputs: Added mapping for ImGuiKey_KeyPadEnter.
+//  2019-04-23: Inputs: Added support for SDL_GameController (if ImGuiConfigFlags_NavEnableGamepad is set by user application).
+//  2019-03-12: Misc: Preserve DisplayFramebufferScale when main window is minimized.
+//  2018-12-21: Inputs: Workaround for Android/iOS which don't seem to handle focus related calls.
+//  2018-11-30: Misc: Setting up io.BackendPlatformName so it can be displayed in the About Window.
+//  2018-11-14: Changed the signature of ImGui_ImplSDL2_ProcessEvent() to take a 'const SDL_Event*'.
+//  2018-08-01: Inputs: Workaround for Emscripten which doesn't seem to handle focus related calls.
+//  2018-06-29: Inputs: Added support for the ImGuiMouseCursor_Hand cursor.
+//  2018-06-08: Misc: Extracted imgui_impl_sdl.cpp/.h away from the old combined SDL2+OpenGL/Vulkan examples.
+//  2018-06-08: Misc: ImGui_ImplSDL2_InitForOpenGL() now takes a SDL_GLContext parameter.
+//  2018-05-09: Misc: Fixed clipboard paste memory leak (we didn't call SDL_FreeMemory on the data returned by SDL_GetClipboardText).
+//  2018-03-20: Misc: Setup io.BackendFlags ImGuiBackendFlags_HasMouseCursors flag + honor ImGuiConfigFlags_NoMouseCursorChange flag.
+//  2018-02-16: Inputs: Added support for mouse cursors, honoring ImGui::GetMouseCursor() value.
+//  2018-02-06: Misc: Removed call to ImGui::Shutdown() which is not available from 1.60 WIP, user needs to call CreateContext/DestroyContext themselves.
+//  2018-02-06: Inputs: Added mapping for ImGuiKey_Space.
+//  2018-02-05: Misc: Using SDL_GetPerformanceCounter() instead of SDL_GetTicks() to be able to handle very high framerate (1000+ FPS).
+//  2018-02-05: Inputs: Keyboard mapping is using scancodes everywhere instead of a confusing mixture of keycodes and scancodes.
+//  2018-01-20: Inputs: Added Horizontal Mouse Wheel support.
+//  2018-01-19: Inputs: When available (SDL 2.0.4+) using SDL_CaptureMouse() to retrieve coordinates outside of client area when dragging. Otherwise (SDL 2.0.3 and before) testing for SDL_WINDOW_INPUT_FOCUS instead of SDL_WINDOW_MOUSE_FOCUS.
+//  2018-01-18: Inputs: Added mapping for ImGuiKey_Insert.
+//  2017-08-25: Inputs: MousePos set to -FLT_MAX,-FLT_MAX when mouse is unavailable/missing (instead of -1,-1).
+//  2016-10-15: Misc: Added a void* user_data parameter to Clipboard function handlers.
+
+#include "imgui.h"
+#ifndef IMGUI_DISABLE
+#include "imgui_impl_sdl2.h"
+
+// Clang warnings with -Weverything
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wold-style-cast"                 // warning: use of old-style cast
+#pragma clang diagnostic ignored "-Wimplicit-int-float-conversion"  // warning: implicit conversion from 'xxx' to 'float' may lose precision
+#endif
+
+// SDL
+// (the multi-viewports feature requires SDL features supported from SDL 2.0.4+. SDL 2.0.5+ is highly recommended)
+#include <SDL.h>
+#include <SDL_syswm.h>
+#include <stdio.h>              // for snprintf()
+#include <stdlib.h>             // for atof()
+#include <string.h>             // for strncmp(), strchr()
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#ifdef __EMSCRIPTEN__
+#include <emscripten/em_js.h>
+#endif
+#undef Status // X11 headers are leaking this.
+
+#if SDL_VERSION_ATLEAST(2,0,4) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(__amigaos4__)
+#define SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE    1
+#else
+#define SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE    0
+#endif
+#define SDL_HAS_WINDOW_ALPHA                SDL_VERSION_ATLEAST(2,0,5)
+#define SDL_HAS_ALWAYS_ON_TOP               SDL_VERSION_ATLEAST(2,0,5)
+#define SDL_HAS_USABLE_DISPLAY_BOUNDS       SDL_VERSION_ATLEAST(2,0,5)
+#define SDL_HAS_PER_MONITOR_DPI             SDL_VERSION_ATLEAST(2,0,4)
+#define SDL_HAS_VULKAN                      SDL_VERSION_ATLEAST(2,0,6)
+#define SDL_HAS_DISPLAY_EVENT               SDL_VERSION_ATLEAST(2,0,9)
+#define SDL_HAS_OPEN_URL                    SDL_VERSION_ATLEAST(2,0,14)
+#define SDL_HAS_SHOW_WINDOW_ACTIVATION_HINT SDL_VERSION_ATLEAST(2,0,18)
+#if SDL_HAS_VULKAN
+#include <SDL_vulkan.h>
+#else
+static const Uint32 SDL_WINDOW_VULKAN = 0x10000000;
+#endif
+
+// State of a single finger touch, see ImGui_ImplSDL2_ProcessFingerEvent()
+enum ImGui_ImplSDL2_TouchState
+{
+    ImGui_ImplSDL2_TouchState_None,
+    ImGui_ImplSDL2_TouchState_Pending,      // Finger is down but hasn't moved or been held long enough to decide what it is, no mouse button pressed yet
+    ImGui_ImplSDL2_TouchState_Dragging,     // Finger moved: left mouse button is down
+    ImGui_ImplSDL2_TouchState_LongPressed,  // Finger was held in place: a right click was sent, nothing further until the finger is lifted
+};
+
+struct ImGui_ImplSDL2_TouchFinger
+{
+    SDL_FingerID    Id;
+    Uint32          WindowID;
+    ImVec2          Pos;        // In window coordinates
+};
+
+// SDL Data
+struct ImGui_ImplSDL2_Data
+{
+    SDL_Window*             Window;
+    Uint32                  WindowID;       // Stored in ImGuiViewport::PlatformHandle. Use SDL_GetWindowFromID() to get SDL_Window* from Uint32 WindowID.
+    SDL_Renderer*           Renderer;
+    Uint64                  Time;
+    char*                   ClipboardTextData;
+    char                    BackendPlatformName[48];
+    bool                    UseVulkan;
+    bool                    WantUpdateMonitors;
+
+    // Mouse handling
+    Uint32                  MouseWindowID;
+    int                     MouseButtonsDown;
+    SDL_Cursor*             MouseCursors[ImGuiMouseCursor_COUNT];
+    SDL_Cursor*             MouseLastCursor;
+    int                     MouseLastLeaveFrame;
+    bool                    MouseCanUseGlobalState;
+    bool                    MouseCanReportHoveredViewport;  // This is hard to use/unreliable on SDL so we'll set ImGuiBackendFlags_HasMouseHoveredViewport dynamically based on state.
+    ImGui_ImplSDL2_MouseCaptureMode MouseCaptureMode;
+
+    // Touch handling: a single finger is converted to mouse input, two or more fingers to mouse position + wheel (pinch zoom)
+    ImVector<ImGui_ImplSDL2_TouchFinger> TouchFingers;      // Fingers currently down, in order of touch down
+    bool                    TouchMultiActive;               // Set when a second finger goes down, cleared when all fingers are up
+    bool                    PinchHorizontal;                // Orientation of the fingers when the pinch started
+    float                   PinchLastDistance;
+    ImVec2                  PinchLastMidpoint;              // In window coordinates
+    ImVec2                  PinchPanAccum;                  // Midpoint movement since the start of the frame
+    ImVec2                  PinchPanDelta;                  // Midpoint movement during the last frame, see ImGui_ImplSDL2_GetTouchPanDelta()
+    bool                    PinchPosPending;                // Pinch mouse position/wheel are accumulated here and sent once per frame, see ImGui_ImplSDL2_PinchFlush()
+    ImVec2                  PinchPendingPos;                // In mouse coordinates
+    ImVec2                  PinchPendingWheel;
+    bool                    PinchFlushedPosLast;
+    ImGui_ImplSDL2_TouchState TouchState;                   // Single finger state (not used in multitouch mode)
+    ImVec2                  TouchStartPos;                  // Where the single finger went down, in window coordinates
+    Uint32                  TouchDownTicks;                 // SDL_GetTicks() when the single finger went down
+    SDL_TimerID             TouchLongPressTimer;            // Wakes up the main loop when it's time to check for a long press
+    int                     TouchWakeFrames;                // Number of further frames needed to process queued multi-step input (e.g. mouse down then up)
+    bool                    TouchClearPosPending;           // All fingers are up: move the mouse away once the rest of the touch input has been sent
+    Uint32                  TouchDownTimestamp;             // SDL event timestamp when the single finger went down, sent as the time of its (deferred) left press
+    Uint32                  FrameTicks;                     // SDL_GetTicks() in the last ImGui_ImplSDL2_NewFrame(), corresponding to ImGui::GetTime() between frames
+
+    // Gamepad handling
+    ImVector<SDL_GameController*> Gamepads;
+    ImGui_ImplSDL2_GamepadMode    GamepadMode;
+    bool                          WantUpdateGamepadsList;
+
+    ImGui_ImplSDL2_Data()   { memset((void*)this, 0, sizeof(*this)); }
+};
+
+// Backend data stored in io.BackendPlatformUserData to allow support for multiple Dear ImGui contexts
+// It is STRONGLY preferred that you use docking branch with multi-viewports (== single Dear ImGui context + multiple windows) instead of multiple Dear ImGui contexts.
+// FIXME: multi-context support is not well tested and probably dysfunctional in this backend.
+// FIXME: some shared resources (mouse cursor shape, gamepad) are mishandled when using multi-context.
+static ImGui_ImplSDL2_Data* ImGui_ImplSDL2_GetBackendData()
+{
+    return ImGui::GetCurrentContext() ? (ImGui_ImplSDL2_Data*)ImGui::GetIO().BackendPlatformUserData : nullptr;
+}
+
+// Forward Declarations
+static void ImGui_ImplSDL2_UpdateMonitors();
+static void ImGui_ImplSDL2_InitMultiViewportSupport(SDL_Window* window, void* sdl_gl_context);
+static void ImGui_ImplSDL2_ShutdownMultiViewportSupport();
+
+// Functions
+static const char* ImGui_ImplSDL2_GetClipboardText(ImGuiContext*)
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    if (bd->ClipboardTextData)
+        SDL_free(bd->ClipboardTextData);
+    if (SDL_HasClipboardText())
+        bd->ClipboardTextData = SDL_GetClipboardText();
+    else
+        bd->ClipboardTextData = nullptr;
+    return bd->ClipboardTextData;
+}
+
+static void ImGui_ImplSDL2_SetClipboardText(ImGuiContext*, const char* text)
+{
+    SDL_SetClipboardText(text);
+}
+
+// Note: native IME will only display if user calls SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1") _before_ SDL_CreateWindow().
+static void ImGui_ImplSDL2_PlatformSetImeData(ImGuiContext*, ImGuiViewport* viewport, ImGuiPlatformImeData* data)
+{
+    if (data->WantVisible)
+    {
+        SDL_Rect r;
+        r.x = (int)(data->InputPos.x - viewport->Pos.x);
+        r.y = (int)(data->InputPos.y - viewport->Pos.y);
+        r.w = 1;
+        r.h = (int)data->InputLineHeight;
+        SDL_SetTextInputRect(&r);
+    }
+}
+
+// Not static to allow third-party code to use that if they want to (but undocumented)
+ImGuiKey ImGui_ImplSDL2_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode);
+ImGuiKey ImGui_ImplSDL2_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode)
+{
+    switch (keycode)
+    {
+        case SDLK_TAB: return ImGuiKey_Tab;
+        case SDLK_LEFT: return ImGuiKey_LeftArrow;
+        case SDLK_RIGHT: return ImGuiKey_RightArrow;
+        case SDLK_UP: return ImGuiKey_UpArrow;
+        case SDLK_DOWN: return ImGuiKey_DownArrow;
+        case SDLK_PAGEUP: return ImGuiKey_PageUp;
+        case SDLK_PAGEDOWN: return ImGuiKey_PageDown;
+        case SDLK_HOME: return ImGuiKey_Home;
+        case SDLK_END: return ImGuiKey_End;
+        case SDLK_INSERT: return ImGuiKey_Insert;
+        case SDLK_DELETE: return ImGuiKey_Delete;
+        case SDLK_BACKSPACE: return ImGuiKey_Backspace;
+        case SDLK_SPACE: return ImGuiKey_Space;
+        case SDLK_RETURN: return ImGuiKey_Enter;
+        case SDLK_ESCAPE: return ImGuiKey_Escape;
+        //case SDLK_QUOTE: return ImGuiKey_Apostrophe;
+        case SDLK_COMMA: return ImGuiKey_Comma;
+        //case SDLK_MINUS: return ImGuiKey_Minus;
+        case SDLK_PERIOD: return ImGuiKey_Period;
+        //case SDLK_SLASH: return ImGuiKey_Slash;
+        case SDLK_SEMICOLON: return ImGuiKey_Semicolon;
+        //case SDLK_EQUALS: return ImGuiKey_Equal;
+        //case SDLK_LEFTBRACKET: return ImGuiKey_LeftBracket;
+        //case SDLK_BACKSLASH: return ImGuiKey_Backslash;
+        //case SDLK_RIGHTBRACKET: return ImGuiKey_RightBracket;
+        //case SDLK_BACKQUOTE: return ImGuiKey_GraveAccent;
+        case SDLK_CAPSLOCK: return ImGuiKey_CapsLock;
+        case SDLK_SCROLLLOCK: return ImGuiKey_ScrollLock;
+        case SDLK_NUMLOCKCLEAR: return ImGuiKey_NumLock;
+        case SDLK_PRINTSCREEN: return ImGuiKey_PrintScreen;
+        case SDLK_PAUSE: return ImGuiKey_Pause;
+        case SDLK_KP_0: return ImGuiKey_Keypad0;
+        case SDLK_KP_1: return ImGuiKey_Keypad1;
+        case SDLK_KP_2: return ImGuiKey_Keypad2;
+        case SDLK_KP_3: return ImGuiKey_Keypad3;
+        case SDLK_KP_4: return ImGuiKey_Keypad4;
+        case SDLK_KP_5: return ImGuiKey_Keypad5;
+        case SDLK_KP_6: return ImGuiKey_Keypad6;
+        case SDLK_KP_7: return ImGuiKey_Keypad7;
+        case SDLK_KP_8: return ImGuiKey_Keypad8;
+        case SDLK_KP_9: return ImGuiKey_Keypad9;
+        case SDLK_KP_PERIOD: return ImGuiKey_KeypadDecimal;
+        case SDLK_KP_DIVIDE: return ImGuiKey_KeypadDivide;
+        case SDLK_KP_MULTIPLY: return ImGuiKey_KeypadMultiply;
+        case SDLK_KP_MINUS: return ImGuiKey_KeypadSubtract;
+        case SDLK_KP_PLUS: return ImGuiKey_KeypadAdd;
+        case SDLK_KP_ENTER: return ImGuiKey_KeypadEnter;
+        case SDLK_KP_EQUALS: return ImGuiKey_KeypadEqual;
+        case SDLK_LCTRL: return ImGuiKey_LeftCtrl;
+        case SDLK_LSHIFT: return ImGuiKey_LeftShift;
+        case SDLK_LALT: return ImGuiKey_LeftAlt;
+        case SDLK_LGUI: return ImGuiKey_LeftSuper;
+        case SDLK_RCTRL: return ImGuiKey_RightCtrl;
+        case SDLK_RSHIFT: return ImGuiKey_RightShift;
+        case SDLK_RALT: return ImGuiKey_RightAlt;
+        case SDLK_RGUI: return ImGuiKey_RightSuper;
+        case SDLK_APPLICATION: return ImGuiKey_Menu;
+        case SDLK_0: return ImGuiKey_0;
+        case SDLK_1: return ImGuiKey_1;
+        case SDLK_2: return ImGuiKey_2;
+        case SDLK_3: return ImGuiKey_3;
+        case SDLK_4: return ImGuiKey_4;
+        case SDLK_5: return ImGuiKey_5;
+        case SDLK_6: return ImGuiKey_6;
+        case SDLK_7: return ImGuiKey_7;
+        case SDLK_8: return ImGuiKey_8;
+        case SDLK_9: return ImGuiKey_9;
+        case SDLK_a: return ImGuiKey_A;
+        case SDLK_b: return ImGuiKey_B;
+        case SDLK_c: return ImGuiKey_C;
+        case SDLK_d: return ImGuiKey_D;
+        case SDLK_e: return ImGuiKey_E;
+        case SDLK_f: return ImGuiKey_F;
+        case SDLK_g: return ImGuiKey_G;
+        case SDLK_h: return ImGuiKey_H;
+        case SDLK_i: return ImGuiKey_I;
+        case SDLK_j: return ImGuiKey_J;
+        case SDLK_k: return ImGuiKey_K;
+        case SDLK_l: return ImGuiKey_L;
+        case SDLK_m: return ImGuiKey_M;
+        case SDLK_n: return ImGuiKey_N;
+        case SDLK_o: return ImGuiKey_O;
+        case SDLK_p: return ImGuiKey_P;
+        case SDLK_q: return ImGuiKey_Q;
+        case SDLK_r: return ImGuiKey_R;
+        case SDLK_s: return ImGuiKey_S;
+        case SDLK_t: return ImGuiKey_T;
+        case SDLK_u: return ImGuiKey_U;
+        case SDLK_v: return ImGuiKey_V;
+        case SDLK_w: return ImGuiKey_W;
+        case SDLK_x: return ImGuiKey_X;
+        case SDLK_y: return ImGuiKey_Y;
+        case SDLK_z: return ImGuiKey_Z;
+        case SDLK_F1: return ImGuiKey_F1;
+        case SDLK_F2: return ImGuiKey_F2;
+        case SDLK_F3: return ImGuiKey_F3;
+        case SDLK_F4: return ImGuiKey_F4;
+        case SDLK_F5: return ImGuiKey_F5;
+        case SDLK_F6: return ImGuiKey_F6;
+        case SDLK_F7: return ImGuiKey_F7;
+        case SDLK_F8: return ImGuiKey_F8;
+        case SDLK_F9: return ImGuiKey_F9;
+        case SDLK_F10: return ImGuiKey_F10;
+        case SDLK_F11: return ImGuiKey_F11;
+        case SDLK_F12: return ImGuiKey_F12;
+        case SDLK_F13: return ImGuiKey_F13;
+        case SDLK_F14: return ImGuiKey_F14;
+        case SDLK_F15: return ImGuiKey_F15;
+        case SDLK_F16: return ImGuiKey_F16;
+        case SDLK_F17: return ImGuiKey_F17;
+        case SDLK_F18: return ImGuiKey_F18;
+        case SDLK_F19: return ImGuiKey_F19;
+        case SDLK_F20: return ImGuiKey_F20;
+        case SDLK_F21: return ImGuiKey_F21;
+        case SDLK_F22: return ImGuiKey_F22;
+        case SDLK_F23: return ImGuiKey_F23;
+        case SDLK_F24: return ImGuiKey_F24;
+        case SDLK_AC_BACK: return ImGuiKey_AppBack;
+        case SDLK_AC_FORWARD: return ImGuiKey_AppForward;
+        default: break;
+    }
+
+    // Fallback to scancode
+    switch (scancode)
+    {
+    case SDL_SCANCODE_GRAVE: return ImGuiKey_GraveAccent;
+    case SDL_SCANCODE_MINUS: return ImGuiKey_Minus;
+    case SDL_SCANCODE_EQUALS: return ImGuiKey_Equal;
+    case SDL_SCANCODE_LEFTBRACKET: return ImGuiKey_LeftBracket;
+    case SDL_SCANCODE_RIGHTBRACKET: return ImGuiKey_RightBracket;
+    case SDL_SCANCODE_NONUSBACKSLASH: return ImGuiKey_Oem102;
+    case SDL_SCANCODE_BACKSLASH: return ImGuiKey_Backslash;
+    case SDL_SCANCODE_SEMICOLON: return ImGuiKey_Semicolon;
+    case SDL_SCANCODE_APOSTROPHE: return ImGuiKey_Apostrophe;
+    case SDL_SCANCODE_COMMA: return ImGuiKey_Comma;
+    case SDL_SCANCODE_PERIOD: return ImGuiKey_Period;
+    case SDL_SCANCODE_SLASH: return ImGuiKey_Slash;
+    default: break;
+    }
+    return ImGuiKey_None;
+}
+
+static void ImGui_ImplSDL2_UpdateKeyModifiers(SDL_Keymod sdl_key_mods)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddKeyEvent(ImGuiMod_Ctrl, (sdl_key_mods & KMOD_CTRL) != 0);
+    io.AddKeyEvent(ImGuiMod_Shift, (sdl_key_mods & KMOD_SHIFT) != 0);
+    io.AddKeyEvent(ImGuiMod_Alt, (sdl_key_mods & KMOD_ALT) != 0);
+    io.AddKeyEvent(ImGuiMod_Super, (sdl_key_mods & KMOD_GUI) != 0);
+}
+
+static ImGuiViewport* ImGui_ImplSDL2_GetViewportForWindowID(Uint32 window_id)
+{
+    return ImGui::FindViewportByPlatformHandle((void*)(intptr_t)window_id);
+}
+
+// Touchscreen input.
+// Dear ImGui has no multitouch support, so we handle SDL_FINGER* events ourselves (and ignore the mouse events SDL emulates from touch):
+// - One finger acts as the left mouse button. The button is pressed once we know it isn't a long press: when the finger is lifted (a tap, sent as a
+//   press and release) or when it moves more than LONG_PRESS_MOVE_SLOP (a drag, pressed at the point where the finger went down). Dear ImGui has no way to
+//   cancel a press, so pressing on touch down would click whatever is under the finger before we could turn the touch into a right click.
+// - Holding one finger still for LONG_PRESS_TIME_MS acts as a right click (press and release) at that point, sent while the finger is still down
+//   so context menus appear right away. Nothing more is sent until the finger is lifted, other than mouse movement.
+// - Once a second finger goes down we cancel that click/drag and switch to multitouch mode, which lasts until all fingers are lifted
+//   (so a finger left over after a pinch doesn't start a new drag). While at least two fingers are down we report:
+//   - the midpoint between the first two fingers as the mouse position (so hover, and the zoom target, follow the gesture)
+//   - the change in finger distance as mouse wheel movement, on the horizontal wheel axis if the fingers were placed
+//     more horizontally than vertically when the pinch started, otherwise on the vertical wheel axis.
+//     The axis is locked for the duration of the pinch so it can't flip back and forth when the fingers pass near 45 degrees.
+//   - the movement of that midpoint, as a pan gesture the application can query with ImGui_ImplSDL2_GetTouchPanDelta()
+// - Once all fingers are lifted, and the clicks/wheel movement they made have been processed, the mouse position is cleared (a finger has no hover).
+// - The deferred left press is sent with the time the finger went down (io.AddMouseButtonEventWithTime()), so double taps (including double tap
+//   and drag) are timed between touch downs, not by when the presses were sent or which frames processed them.
+// Positive wheel values mean fingers spreading apart (zoom in). Each wheel step corresponds to a zoom factor of PINCH_ZOOM_STEP_FACTOR,
+// matching the per-step zoom applied by the application, so the content scales 1:1 with the finger spread.
+// These events are sent with ImGuiMouseSource_TouchScreen so the application can tell them apart from real scrolling.
+//
+// Notes on platform quirks:
+// - On X11, SDL_CaptureMouse() (pointer grab) while fingers are down causes FINGERUP events to be lost, so we never capture during touch.
+// - Touch panels may reassign finger ids mid-gesture (one finger up and another down in the same millisecond); handled by restarting the pinch.
+static const float PINCH_ZOOM_STEP_FACTOR = 1.5f;
+static const Uint32 LONG_PRESS_TIME_MS = 500;
+static const float LONG_PRESS_MOVE_SLOP = 10.0f;    // In window coordinates
+
+// Define IMGUI_IMPL_SDL2_TOUCH_DEBUG to log touch input to stdout
+#ifdef IMGUI_IMPL_SDL2_TOUCH_DEBUG
+#define TOUCH_LOG(...) do { printf("[touch] " __VA_ARGS__); fflush(stdout); } while(0)
+#else
+#define TOUCH_LOG(...) do { } while(0)
+#endif
+
+static int ImGui_ImplSDL2_TouchFindFinger(const ImGui_ImplSDL2_Data* bd, SDL_FingerID id)
+{
+    for (int n = 0; n < bd->TouchFingers.Size; n++)
+        if (bd->TouchFingers[n].Id == id)
+            return n;
+    return -1;
+}
+
+// Convert normalized finger coordinates to window coordinates (same space as SDL_MOUSEMOTION x/y)
+static ImVec2 ImGui_ImplSDL2_FingerToWindowPos(const SDL_TouchFingerEvent* finger, Uint32 window_id)
+{
+    int w = 0, h = 0;
+    SDL_Window* window = SDL_GetWindowFromID(window_id);
+    if (window)
+        SDL_GetWindowSize(window, &w, &h);
+    return ImVec2(finger->x * (float)w, finger->y * (float)h);
+}
+
+// Convert window coordinates to the space used for io.AddMousePosEvent() (same handling as SDL_MOUSEMOTION)
+static ImVec2 ImGui_ImplSDL2_WindowToMousePos(ImVec2 pos, Uint32 window_id)
+{
+    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    {
+        int window_x, window_y;
+        SDL_GetWindowPosition(SDL_GetWindowFromID(window_id), &window_x, &window_y);
+        pos.x += window_x;
+        pos.y += window_y;
+    }
+    return pos;
+}
+
+static void ImGui_ImplSDL2_AddTouchMousePos(ImGuiIO& io, ImVec2 mouse_pos)
+{
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
+}
+
+// Convert an SDL event timestamp to the Dear ImGui clock (ImGui::GetTime()), for io.AddMouseButtonEventWithTime().
+// Events arrive between frames, after the ImGui::GetTime() of the last frame, which corresponds to FrameTicks.
+static double ImGui_ImplSDL2_EventTime(const ImGui_ImplSDL2_Data* bd, Uint32 timestamp)
+{
+    return ImGui::GetTime() + (double)(Sint32)(timestamp - bd->FrameTicks) / 1000.0;
+}
+
+static void ImGui_ImplSDL2_TouchSetLeftButton(ImGui_ImplSDL2_Data* bd, ImGuiIO& io, bool down)
+{
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    if (down)
+        io.AddMouseButtonEventWithTime(0, true, ImGui_ImplSDL2_EventTime(bd, bd->TouchDownTimestamp));
+    else
+        io.AddMouseButtonEvent(0, false);
+    bd->MouseButtonsDown = down ? (bd->MouseButtonsDown | (1 << 0)) : (bd->MouseButtonsDown & ~(1 << 0));
+}
+
+static void ImGui_ImplSDL2_WakeMainLoop()
+{
+    SDL_Event wake;
+    memset(&wake, 0, sizeof(wake));
+    wake.type = SDL_USEREVENT;
+    SDL_PushEvent(&wake);
+}
+
+// Runs on SDL's timer thread. The long press itself is detected in ImGui_ImplSDL2_NewFrame(), this just makes sure a frame happens when it's due,
+// since the app may only render in response to events and a stationary finger doesn't generate any.
+static Uint32 SDLCALL ImGui_ImplSDL2_LongPressTimerCallback(Uint32 interval, void* param)
+{
+    IM_UNUSED(interval);
+    IM_UNUSED(param);
+    ImGui_ImplSDL2_WakeMainLoop();
+    return 0;
+}
+
+static void ImGui_ImplSDL2_TouchStopLongPressTimer(ImGui_ImplSDL2_Data* bd)
+{
+    if (bd->TouchLongPressTimer)
+    {
+        SDL_RemoveTimer(bd->TouchLongPressTimer);
+        bd->TouchLongPressTimer = 0;
+    }
+}
+
+// Abandon whatever the single finger was doing, without any further clicks (releases the left button if it was down)
+static void ImGui_ImplSDL2_TouchCancelSingle(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
+{
+    ImGui_ImplSDL2_TouchStopLongPressTimer(bd);
+    if (bd->TouchState == ImGui_ImplSDL2_TouchState_Dragging)
+        ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false);
+    bd->TouchState = ImGui_ImplSDL2_TouchState_None;
+}
+
+// Requests at least this many more frames, to process queued multi-step input
+static void ImGui_ImplSDL2_TouchWakeFrames(ImGui_ImplSDL2_Data* bd, int frames)
+{
+    if (bd->TouchWakeFrames < frames)
+        bd->TouchWakeFrames = frames;
+}
+
+// Called every frame: turns a finger that has been held in place into a right click, and requests a frame for any two-step input queued since the last one.
+// Dear ImGui only applies one change per mouse button per frame, so e.g. a press and release queued together need two frames.
+static void ImGui_ImplSDL2_TouchUpdate(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
+{
+    // The timer was started after TouchDownTicks was read so if it woke us up, LONG_PRESS_TIME_MS has elapsed
+    if (bd->TouchState == ImGui_ImplSDL2_TouchState_Pending && (Uint32)(SDL_GetTicks() - bd->TouchDownTicks) >= LONG_PRESS_TIME_MS)
+    {
+        TOUCH_LOG("long press\n");
+        ImGui_ImplSDL2_TouchStopLongPressTimer(bd);
+        bd->TouchState = ImGui_ImplSDL2_TouchState_LongPressed;
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        io.AddMouseButtonEvent(1, true);
+        io.AddMouseButtonEvent(1, false);
+        ImGui_ImplSDL2_TouchWakeFrames(bd, 1);
+    }
+
+    // A finger has no hover: once all fingers are up, move the mouse away so hover highlights and tooltips don't stay
+    // where the finger was. Dear ImGui won't apply a mouse move until it has processed the button and wheel events
+    // queued before it, so this doesn't change where those happen. That may take two more frames (e.g. tap: down, up, move).
+    if (bd->TouchClearPosPending && bd->TouchFingers.Size == 0 && !bd->PinchPosPending &&
+        bd->PinchPendingWheel.x == 0.0f && bd->PinchPendingWheel.y == 0.0f)
+    {
+        TOUCH_LOG("clear mouse pos\n");
+        bd->TouchClearPosPending = false;
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        ImGui_ImplSDL2_TouchWakeFrames(bd, 2);
+    }
+
+    if (bd->TouchWakeFrames > 0)
+    {
+        bd->TouchWakeFrames--;
+        ImGui_ImplSDL2_WakeMainLoop();
+    }
+}
+
+// Finger motion arrives much faster than frames are rendered. Dear ImGui does not merge wheel events, and its input trickling only processes one of
+// {mouse move, mouse wheel} per frame, so queueing a pos + wheel pair for every finger event makes the queue drain far slower than the fingers move.
+// Instead we accumulate the latest position and the total wheel movement, and send at most one of them per frame, alternating if both are pending.
+static void ImGui_ImplSDL2_PinchFlush(ImGui_ImplSDL2_Data* bd, ImGuiIO& io)
+{
+    bool wheel_pending = (bd->PinchPendingWheel.x != 0.0f || bd->PinchPendingWheel.y != 0.0f);
+    if (bd->PinchPosPending && (!wheel_pending || !bd->PinchFlushedPosLast))
+    {
+        ImGui_ImplSDL2_AddTouchMousePos(io, bd->PinchPendingPos);
+        bd->PinchPosPending = false;
+        bd->PinchFlushedPosLast = true;
+    }
+    else if (wheel_pending)
+    {
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        io.AddMouseWheelEvent(bd->PinchPendingWheel.x, bd->PinchPendingWheel.y);
+        bd->PinchPendingWheel = ImVec2(0.0f, 0.0f);
+        bd->PinchFlushedPosLast = false;
+        wheel_pending = false;
+    }
+
+    // Make sure we get another frame to send whatever is left, in case the app is only rendering in response to events
+    if (bd->PinchPosPending || wheel_pending)
+    {
+        ImGui_ImplSDL2_WakeMainLoop();
+    }
+}
+
+// Update pinch from the first two fingers. Call with restart=true when the set of fingers has changed, false when they have only moved.
+static void ImGui_ImplSDL2_PinchUpdate(ImGui_ImplSDL2_Data* bd, bool restart)
+{
+    if (bd->TouchFingers.Size < 2)
+        return;
+    const ImGui_ImplSDL2_TouchFinger& f0 = bd->TouchFingers[0];
+    const ImGui_ImplSDL2_TouchFinger& f1 = bd->TouchFingers[1];
+    float dx = f1.Pos.x - f0.Pos.x;
+    float dy = f1.Pos.y - f0.Pos.y;
+    float distance = sqrtf(dx * dx + dy * dy);
+
+    ImVec2 midpoint((f0.Pos.x + f1.Pos.x) * 0.5f, (f0.Pos.y + f1.Pos.y) * 0.5f);
+    bd->PinchPosPending = true;
+    bd->PinchPendingPos = ImGui_ImplSDL2_WindowToMousePos(midpoint, f0.WindowID);
+
+    if (restart)
+    {
+        bd->PinchHorizontal = fabsf(dx) >= fabsf(dy);
+        TOUCH_LOG("pinch begin: fingers %lld,%lld distance=%.1f axis=%s\n", (long long)f0.Id, (long long)f1.Id, distance, bd->PinchHorizontal ? "horizontal" : "vertical");
+    }
+    else
+    {
+        if (distance > 0.0f && bd->PinchLastDistance > 0.0f)
+        {
+            float wheel = logf(distance / bd->PinchLastDistance) / logf(PINCH_ZOOM_STEP_FACTOR);
+            if (bd->PinchHorizontal)
+                bd->PinchPendingWheel.x += wheel;
+            else
+                bd->PinchPendingWheel.y += wheel;
+        }
+
+        // Only movement of the same two fingers counts as panning, not the midpoint jumping when the fingers change
+        bd->PinchPanAccum.x += midpoint.x - bd->PinchLastMidpoint.x;
+        bd->PinchPanAccum.y += midpoint.y - bd->PinchLastMidpoint.y;
+    }
+    bd->PinchLastDistance = distance;
+    bd->PinchLastMidpoint = midpoint;
+}
+
+static bool ImGui_ImplSDL2_ProcessFingerEvent(const SDL_TouchFingerEvent* finger)
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    ImGuiIO& io = ImGui::GetIO();
+
+    TOUCH_LOG("finger %s t=%u id=%lld touch=%lld win=%u x=%.3f y=%.3f (tracked=%d multi=%d)\n",
+        finger->type == SDL_FINGERDOWN ? "down" : finger->type == SDL_FINGERUP ? "up" : "motion",
+        finger->timestamp, (long long)finger->fingerId, (long long)finger->touchId, finger->windowID, finger->x, finger->y,
+        bd->TouchFingers.Size, (int)bd->TouchMultiActive);
+
+#if SDL_VERSION_ATLEAST(2,0,10)
+    // Touchpads report finger events with device-relative coordinates, and already generate scroll events. Only handle touchscreens.
+    if (SDL_GetTouchDeviceType(finger->touchId) != SDL_TOUCH_DEVICE_DIRECT)
+        return false;
+#endif
+
+    int slot = ImGui_ImplSDL2_TouchFindFinger(bd, finger->fingerId);
+    switch (finger->type)
+    {
+        case SDL_FINGERDOWN:
+        {
+            Uint32 window_id = finger->windowID ? finger->windowID : bd->WindowID;
+            if (ImGui_ImplSDL2_GetViewportForWindowID(window_id) == nullptr)
+                return false;
+            if (bd->TouchFingers.Size > 0 && bd->TouchFingers[0].WindowID != window_id)
+                return false; // Fingers in different windows can't be combined
+            if (slot >= 0)
+                bd->TouchFingers.erase(bd->TouchFingers.Data + slot); // Finger already down (missed the up event?)
+
+            bd->TouchClearPosPending = false; // Finger is back before the mouse was moved away, so leave it where it is
+
+            ImGui_ImplSDL2_TouchFinger f;
+            f.Id = finger->fingerId;
+            f.WindowID = window_id;
+            f.Pos = ImGui_ImplSDL2_FingerToWindowPos(finger, window_id);
+            bd->TouchFingers.push_back(f);
+
+            if (bd->TouchFingers.Size == 1 && !bd->TouchMultiActive)
+            {
+                // Single finger: acts as the left mouse button, or a right click if held. We don't yet know which, so don't press anything.
+                ImGui_ImplSDL2_TouchCancelSingle(bd, io);
+                bd->PinchPosPending = false;
+                ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, window_id));
+                bd->TouchState = ImGui_ImplSDL2_TouchState_Pending;
+                bd->TouchStartPos = f.Pos;
+                bd->TouchDownTicks = SDL_GetTicks();
+                bd->TouchDownTimestamp = finger->timestamp;
+                bd->TouchLongPressTimer = SDL_AddTimer(LONG_PRESS_TIME_MS, ImGui_ImplSDL2_LongPressTimerCallback, nullptr);
+            }
+            else if (bd->TouchFingers.Size >= 2)
+            {
+                // Second finger down: cancel any click/drag/long press started by the first finger and switch to multitouch
+                ImGui_ImplSDL2_TouchCancelSingle(bd, io);
+                bd->TouchMultiActive = true;
+                ImGui_ImplSDL2_PinchUpdate(bd, true);
+            }
+            return true;
+        }
+        case SDL_FINGERMOTION:
+        {
+            if (slot < 0)
+                return false;
+            ImGui_ImplSDL2_TouchFinger& f = bd->TouchFingers[slot];
+            f.Pos = ImGui_ImplSDL2_FingerToWindowPos(finger, f.WindowID);
+            if (bd->TouchMultiActive)
+                ImGui_ImplSDL2_PinchUpdate(bd, false);
+            else if (bd->TouchState == ImGui_ImplSDL2_TouchState_Pending)
+            {
+                // Small movements while waiting for a possible long press are ignored, so the pointer stays where the finger went down.
+                // Once it moves further it's a drag: press at that point, then follow the finger.
+                float dx = f.Pos.x - bd->TouchStartPos.x;
+                float dy = f.Pos.y - bd->TouchStartPos.y;
+                if (dx * dx + dy * dy > LONG_PRESS_MOVE_SLOP * LONG_PRESS_MOVE_SLOP)
+                {
+                    ImGui_ImplSDL2_TouchStopLongPressTimer(bd);
+                    bd->TouchState = ImGui_ImplSDL2_TouchState_Dragging;
+                    ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
+                    ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, f.WindowID));
+                    ImGui_ImplSDL2_TouchWakeFrames(bd, 1); // The move can't be processed in the same frame as the press
+                }
+            }
+            else
+                ImGui_ImplSDL2_AddTouchMousePos(io, ImGui_ImplSDL2_WindowToMousePos(f.Pos, f.WindowID));
+            return true;
+        }
+        case SDL_FINGERUP:
+        {
+            if (slot < 0)
+                return false;
+            bd->TouchFingers.erase(bd->TouchFingers.Data + slot);
+            if (!bd->TouchMultiActive)
+            {
+                // Was the single finger
+                if (bd->TouchState == ImGui_ImplSDL2_TouchState_Pending)
+                {
+                    // Tap: the press and release can't be processed in the same frame
+                    ImGui_ImplSDL2_TouchSetLeftButton(bd, io, true);
+                    ImGui_ImplSDL2_TouchSetLeftButton(bd, io, false);
+                    ImGui_ImplSDL2_TouchWakeFrames(bd, 1);
+                }
+                ImGui_ImplSDL2_TouchCancelSingle(bd, io); // Releases the button if dragging
+            }
+            else if (bd->TouchFingers.Size == 0)
+                bd->TouchMultiActive = false;
+            else
+                ImGui_ImplSDL2_PinchUpdate(bd, true); // Pinch continues with the first two remaining fingers, if any
+            if (bd->TouchFingers.Size == 0)
+                bd->TouchClearPosPending = true; // Sent from ImGui_ImplSDL2_TouchUpdate()
+            return true;
+        }
+    }
+    return false;
+}
+
+// You can read the io.WantCaptureMouse, io.WantCaptureKeyboard flags to tell if dear imgui wants to use your inputs.
+// - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application, or clear/overwrite your copy of the mouse data.
+// - When io.WantCaptureKeyboard is true, do not dispatch keyboard input data to your main application, or clear/overwrite your copy of the keyboard data.
+// Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
+bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    IM_ASSERT(bd != nullptr && "Context or backend not initialized! Did you call ImGui_ImplSDL2_Init()?");
+    ImGuiIO& io = ImGui::GetIO();
+
+    switch (event->type)
+    {
+        case SDL_MOUSEMOTION:
+        {
+            if (ImGui_ImplSDL2_GetViewportForWindowID(event->motion.windowID) == nullptr)
+                return false;
+            if (event->motion.which == SDL_TOUCH_MOUSEID)
+                return false; // Mouse emulation of touch, we handle SDL_FINGER* events instead
+            ImVec2 mouse_pos((float)event->motion.x, (float)event->motion.y);
+            if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+            {
+                // While a button is held we may be dragging the very window the event is relative to. SDL's cached window position
+                // lags behind the real one (X11 updates it asynchronously), so window-relative + cached position oscillates and makes
+                // dragged viewports jitter. Query the absolute cursor position instead.
+                if (bd->MouseCanUseGlobalState && bd->MouseButtonsDown != 0 && !SDL_GetRelativeMouseMode())
+                {
+                    int mouse_x, mouse_y;
+                    SDL_GetGlobalMouseState(&mouse_x, &mouse_y);
+                    mouse_pos = ImVec2((float)mouse_x, (float)mouse_y);
+                }
+                else
+                {
+                    int window_x, window_y;
+                    SDL_GetWindowPosition(SDL_GetWindowFromID(event->motion.windowID), &window_x, &window_y);
+                    mouse_pos.x += window_x;
+                    mouse_pos.y += window_y;
+                }
+            }
+            io.AddMouseSourceEvent(event->motion.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
+            io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
+            return true;
+        }
+        case SDL_MOUSEWHEEL:
+        {
+            if (ImGui_ImplSDL2_GetViewportForWindowID(event->wheel.windowID) == nullptr)
+                return false;
+            //IMGUI_DEBUG_LOG("wheel %.2f %.2f, precise %.2f %.2f\n", (float)event->wheel.x, (float)event->wheel.y, event->wheel.preciseX, event->wheel.preciseY);
+#if SDL_VERSION_ATLEAST(2,0,18) // If this fails to compile on Emscripten: update to latest Emscripten!
+            float wheel_x = -event->wheel.preciseX;
+            float wheel_y = event->wheel.preciseY;
+#else
+            float wheel_x = -(float)event->wheel.x;
+            float wheel_y = (float)event->wheel.y;
+#endif
+#if defined(__EMSCRIPTEN__) && !SDL_VERSION_ATLEAST(2,31,0)
+            wheel_x /= 100.0f;
+#endif
+            io.AddMouseSourceEvent(event->wheel.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
+            io.AddMouseWheelEvent(wheel_x, wheel_y);
+            return true;
+        }
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+        {
+            if (ImGui_ImplSDL2_GetViewportForWindowID(event->button.windowID) == nullptr)
+                return false;
+            if (event->button.which == SDL_TOUCH_MOUSEID)
+                return false; // Mouse emulation of touch, we handle SDL_FINGER* events instead
+            int mouse_button = -1;
+            if (event->button.button == SDL_BUTTON_LEFT) { mouse_button = 0; }
+            if (event->button.button == SDL_BUTTON_RIGHT) { mouse_button = 1; }
+            if (event->button.button == SDL_BUTTON_MIDDLE) { mouse_button = 2; }
+            if (event->button.button == SDL_BUTTON_X1) { mouse_button = 3; }
+            if (event->button.button == SDL_BUTTON_X2) { mouse_button = 4; }
+            if (mouse_button == -1)
+                break;
+            io.AddMouseSourceEvent(event->button.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
+            io.AddMouseButtonEventWithTime(mouse_button, (event->type == SDL_MOUSEBUTTONDOWN), ImGui_ImplSDL2_EventTime(bd, event->button.timestamp));
+            bd->MouseButtonsDown = (event->type == SDL_MOUSEBUTTONDOWN) ? (bd->MouseButtonsDown | (1 << mouse_button)) : (bd->MouseButtonsDown & ~(1 << mouse_button));
+            return true;
+        }
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+        case SDL_FINGERUP:
+            return ImGui_ImplSDL2_ProcessFingerEvent(&event->tfinger);
+        case SDL_TEXTINPUT:
+        {
+            if (ImGui_ImplSDL2_GetViewportForWindowID(event->text.windowID) == nullptr)
+                return false;
+            io.AddInputCharactersUTF8(event->text.text);
+            return true;
+        }
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+        {
+            ImGuiViewport* viewport = ImGui_ImplSDL2_GetViewportForWindowID(event->key.windowID);
+            if (viewport == nullptr)
+                return false;
+            //IMGUI_DEBUG_LOG("SDL_KEY%s : key=0x%08X ('%s'), scancode=%d ('%s'), mod=%X, windowID=%d, viewport=%08X\n",
+            //    (event->type == SDL_KEYDOWN) ? "DOWN" : "UP  ", event->key.keysym.sym, SDL_GetKeyName(event->key.keysym.sym), event->key.keysym.scancode, SDL_GetScancodeName(event->key.keysym.scancode), event->key.keysym.mod, event->key.windowID, viewport ? viewport->ID : 0);
+            ImGui_ImplSDL2_UpdateKeyModifiers((SDL_Keymod)event->key.keysym.mod);
+            ImGuiKey key = ImGui_ImplSDL2_KeyEventToImGuiKey(event->key.keysym.sym, event->key.keysym.scancode);
+            io.AddKeyEvent(key, (event->type == SDL_KEYDOWN));
+            io.SetKeyEventNativeData(key, (int)event->key.keysym.sym, (int)event->key.keysym.scancode, (int)event->key.keysym.scancode); // To support legacy indexing (<1.87 user code). Legacy backend uses SDLK_*** as indices to IsKeyXXX() functions.
+            return true;
+        }
+#if SDL_HAS_DISPLAY_EVENT
+        case SDL_DISPLAYEVENT:
+        {
+            // 2.0.26 has SDL_DISPLAYEVENT_CONNECTED/SDL_DISPLAYEVENT_DISCONNECTED/SDL_DISPLAYEVENT_ORIENTATION,
+            // so change of DPI/Scaling are not reflected in this event. (SDL3 has it)
+            bd->WantUpdateMonitors = true;
+            return true;
+        }
+#endif
+        case SDL_WINDOWEVENT:
+        {
+            ImGuiViewport* viewport = ImGui_ImplSDL2_GetViewportForWindowID(event->window.windowID);
+            if (viewport == NULL)
+                return false;
+
+            // - When capturing mouse, SDL will send a bunch of conflicting LEAVE/ENTER event on every mouse move, but the final ENTER tends to be right.
+            // - However we won't get a correct LEAVE event for a captured window.
+            // - In some cases, when detaching a window from main viewport SDL may send SDL_WINDOWEVENT_ENTER one frame too late,
+            //   causing SDL_WINDOWEVENT_LEAVE on previous frame to interrupt drag operation by clear mouse position. This is why
+            //   we delay process the SDL_WINDOWEVENT_LEAVE events by one frame. See issue #5012 for details.
+            Uint8 window_event = event->window.event;
+            if (window_event == SDL_WINDOWEVENT_ENTER)
+            {
+                bd->MouseWindowID = event->window.windowID;
+                bd->MouseLastLeaveFrame = 0;
+            }
+            if (window_event == SDL_WINDOWEVENT_LEAVE)
+                bd->MouseLastLeaveFrame = ImGui::GetFrameCount() + 1;
+            //if (window_event == SDL_WINDOWEVENT_FOCUS_GAINED) { IMGUI_DEBUG_LOG("SDL_WINDOWEVENT_FOCUS_GAINED: windowId %d, viewport: %08X\n", event->window.windowID, viewport ? viewport->ID : 0); }
+            //if (window_event == SDL_WINDOWEVENT_FOCUS_LOST) { IMGUI_DEBUG_LOG("SDL_WINDOWEVENT_FOCUS_LOST: windowId %d, viewport: %08X\n", event->window.windowID, viewport ? viewport->ID : 0); }
+            if (window_event == SDL_WINDOWEVENT_FOCUS_GAINED)
+                io.AddFocusEvent(true);
+            if (window_event == SDL_WINDOWEVENT_FOCUS_LOST)
+                io.AddFocusEvent(false);
+            if (window_event == SDL_WINDOWEVENT_CLOSE)
+                viewport->PlatformRequestClose = true;
+            if (window_event == SDL_WINDOWEVENT_MOVED)
+                viewport->PlatformRequestMove = true;
+            if (window_event == SDL_WINDOWEVENT_RESIZED)
+                viewport->PlatformRequestResize = true;
+            return true;
+        }
+        case SDL_CONTROLLERDEVICEADDED:
+        case SDL_CONTROLLERDEVICEREMOVED:
+        {
+            bd->WantUpdateGamepadsList = true;
+            return true;
+        }
+        default:
+            break;
+    }
+    return false;
+}
+
+#ifdef __EMSCRIPTEN__
+EM_JS(void, ImGui_ImplSDL2_EmscriptenOpenURL, (char const* url), { url = url ? UTF8ToString(url) : null; if (url) window.open(url, '_blank'); });
+#endif
+
+static bool ImGui_ImplSDL2_Init(SDL_Window* window, SDL_Renderer* renderer, void* sdl_gl_context)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    IMGUI_CHECKVERSION();
+    IM_ASSERT(io.BackendPlatformUserData == nullptr && "Already initialized a platform backend!");
+    //SDL_SetHint(SDL_HINT_EVENT_LOGGING, "2");
+
+    // Obtain compiled and runtime versions
+    SDL_version ver_compiled;
+    SDL_version ver_runtime;
+    SDL_VERSION(&ver_compiled);
+    SDL_GetVersion(&ver_runtime);
+
+    // Setup backend capabilities flags
+    ImGui_ImplSDL2_Data* bd = IM_NEW(ImGui_ImplSDL2_Data)();
+    snprintf(bd->BackendPlatformName, sizeof(bd->BackendPlatformName), "imgui_impl_sdl2 (%u.%u.%u, %u.%u.%u)",
+        ver_compiled.major, ver_compiled.minor, ver_compiled.patch, ver_runtime.major, ver_runtime.minor, ver_runtime.patch);
+    io.BackendPlatformUserData = (void*)bd;
+    io.BackendPlatformName = bd->BackendPlatformName;
+    io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;           // We can honor GetMouseCursor() values (optional)
+    io.BackendFlags |= ImGuiBackendFlags_HasSetMousePos;            // We can honor io.WantSetMousePos requests (optional, rarely used)
+    // (ImGuiBackendFlags_PlatformHasViewports may be set just below)
+
+    bd->Window = window;
+
+#ifdef IMGUI_IMPL_SDL2_TOUCH_DEBUG
+    TOUCH_LOG("init: video driver=%s, %d touch device(s)\n", SDL_GetCurrentVideoDriver(), SDL_GetNumTouchDevices());
+    for (int i = 0; i < SDL_GetNumTouchDevices(); i++)
+        TOUCH_LOG("init:   touch device %d: id=%lld name=%s type=%d\n", i, (long long)SDL_GetTouchDevice(i), SDL_GetTouchName(i) ? SDL_GetTouchName(i) : "?", (int)SDL_GetTouchDeviceType(SDL_GetTouchDevice(i)));
+#endif
+    bd->WindowID = SDL_GetWindowID(window);
+    bd->Renderer = renderer;
+
+    // Check and store if we are on a SDL backend that supports SDL_GetGlobalMouseState() and SDL_CaptureMouse()
+    // ("wayland" and "rpi" don't support it, but we chose to use a white-list instead of a black-list)
+    bd->MouseCanUseGlobalState = false;
+    bd->MouseCaptureMode = ImGui_ImplSDL2_MouseCaptureMode_Disabled;
+#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE
+    const char* sdl_backend = SDL_GetCurrentVideoDriver();
+    const char* capture_and_global_state_whitelist[] = { "windows", "cocoa", "x11", "DIVE", "VMAN" };
+    for (const char* item : capture_and_global_state_whitelist)
+        if (strncmp(sdl_backend, item, strlen(item)) == 0)
+        {
+            bd->MouseCanUseGlobalState = true;
+            bd->MouseCaptureMode = (strcmp(item, "x11") == 0) ? ImGui_ImplSDL2_MouseCaptureMode_EnabledAfterDrag : ImGui_ImplSDL2_MouseCaptureMode_Enabled;
+        }
+#endif
+    if (bd->MouseCanUseGlobalState)
+        io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports;  // We can create multi-viewports on the Platform side (optional)
+
+    // SDL on Linux/OSX doesn't report events for unfocused windows (see https://github.com/ocornut/imgui/issues/4960)
+    // We will use 'MouseCanReportHoveredViewport' to set 'ImGuiBackendFlags_HasMouseHoveredViewport' dynamically each frame.
+#ifndef __APPLE__
+    bd->MouseCanReportHoveredViewport = bd->MouseCanUseGlobalState;
+#else
+    bd->MouseCanReportHoveredViewport = false;
+#endif
+
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    platform_io.Platform_SetClipboardTextFn = ImGui_ImplSDL2_SetClipboardText;
+    platform_io.Platform_GetClipboardTextFn = ImGui_ImplSDL2_GetClipboardText;
+    platform_io.Platform_ClipboardUserData = nullptr;
+    platform_io.Platform_SetImeDataFn = ImGui_ImplSDL2_PlatformSetImeData;
+#ifdef __EMSCRIPTEN__
+    platform_io.Platform_OpenInShellFn = [](ImGuiContext*, const char* url) { ImGui_ImplSDL2_EmscriptenOpenURL(url); return true; };
+#elif SDL_HAS_OPEN_URL
+    platform_io.Platform_OpenInShellFn = [](ImGuiContext*, const char* url) { return SDL_OpenURL(url) == 0; };
+#endif
+
+    // Update monitor a first time during init
+    ImGui_ImplSDL2_UpdateMonitors();
+
+    // Gamepad handling
+    bd->GamepadMode = ImGui_ImplSDL2_GamepadMode_AutoFirst;
+    bd->WantUpdateGamepadsList = true;
+
+    // Load mouse cursors
+    bd->MouseCursors[ImGuiMouseCursor_Arrow] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
+    bd->MouseCursors[ImGuiMouseCursor_TextInput] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_IBEAM);
+    bd->MouseCursors[ImGuiMouseCursor_ResizeAll] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL);
+    bd->MouseCursors[ImGuiMouseCursor_ResizeNS] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENS);
+    bd->MouseCursors[ImGuiMouseCursor_ResizeEW] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
+    bd->MouseCursors[ImGuiMouseCursor_ResizeNESW] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW);
+    bd->MouseCursors[ImGuiMouseCursor_ResizeNWSE] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
+    bd->MouseCursors[ImGuiMouseCursor_Hand] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND);
+    bd->MouseCursors[ImGuiMouseCursor_Wait] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_WAIT);
+    bd->MouseCursors[ImGuiMouseCursor_Progress] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_WAITARROW);
+    bd->MouseCursors[ImGuiMouseCursor_NotAllowed] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NO);
+
+    // Set platform dependent data in viewport
+    // Our mouse update function expect PlatformHandle to be filled for the main viewport
+    ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+    main_viewport->PlatformHandle = (void*)(intptr_t)bd->WindowID;
+    main_viewport->PlatformHandleRaw = nullptr;
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(window, &info))
+    {
+#if defined(SDL_VIDEO_DRIVER_WINDOWS)
+        main_viewport->PlatformHandleRaw = (void*)info.info.win.window;
+#elif defined(__APPLE__) && defined(SDL_VIDEO_DRIVER_COCOA)
+        main_viewport->PlatformHandleRaw = (void*)info.info.cocoa.window;
+#endif
+    }
+
+    // From 2.0.5: Set SDL hint to receive mouse click events on window focus, otherwise SDL doesn't emit the event.
+    // Without this, when clicking to gain focus, our widgets wouldn't activate even though they showed as hovered.
+    // (This is unfortunately a global SDL setting, so enabling it might have a side-effect on your application.
+    // It is unlikely to make a difference, but if your app absolutely needs to ignore the initial on-focus click:
+    // you can ignore SDL_MOUSEBUTTONDOWN events coming right after a SDL_WINDOWEVENT_FOCUS_GAINED)
+#ifdef SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+#endif
+
+    // From 2.0.18: Enable native IME.
+    // IMPORTANT: This is used at the time of SDL_CreateWindow() so this will only affects secondary windows, if any.
+    // For the main window to be affected, your application needs to call this manually before calling SDL_CreateWindow().
+#ifdef SDL_HINT_IME_SHOW_UI
+    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
+#endif
+
+    // From 2.0.22: Disable auto-capture, this is preventing drag and drop across multiple windows (see #5710)
+#ifdef SDL_HINT_MOUSE_AUTO_CAPTURE
+    SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
+#endif
+
+    // We need SDL_CaptureMouse(), SDL_GetGlobalMouseState() from SDL 2.0.4+ to support multiple viewports.
+    // We left the call to ImGui_ImplSDL2_InitMultiViewportSupport() outside of #ifdef to avoid unused-function warnings.
+    if (io.BackendFlags & ImGuiBackendFlags_PlatformHasViewports)
+        ImGui_ImplSDL2_InitMultiViewportSupport(window, sdl_gl_context);
+
+    return true;
+}
+
+bool ImGui_ImplSDL2_InitForOpenGL(SDL_Window* window, void* sdl_gl_context)
+{
+    return ImGui_ImplSDL2_Init(window, nullptr, sdl_gl_context);
+}
+
+bool ImGui_ImplSDL2_InitForVulkan(SDL_Window* window)
+{
+#if !SDL_HAS_VULKAN
+    IM_ASSERT(0 && "Unsupported");
+#endif
+    if (!ImGui_ImplSDL2_Init(window, nullptr, nullptr))
+        return false;
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    bd->UseVulkan = true;
+    return true;
+}
+
+bool ImGui_ImplSDL2_InitForD3D(SDL_Window* window)
+{
+#if !defined(_WIN32)
+    IM_ASSERT(0 && "Unsupported");
+#endif
+    return ImGui_ImplSDL2_Init(window, nullptr, nullptr);
+}
+
+bool ImGui_ImplSDL2_InitForMetal(SDL_Window* window)
+{
+    return ImGui_ImplSDL2_Init(window, nullptr, nullptr);
+}
+
+bool ImGui_ImplSDL2_InitForSDLRenderer(SDL_Window* window, SDL_Renderer* renderer)
+{
+    return ImGui_ImplSDL2_Init(window, renderer, nullptr);
+}
+
+bool ImGui_ImplSDL2_InitForOther(SDL_Window* window)
+{
+    return ImGui_ImplSDL2_Init(window, nullptr, nullptr);
+}
+
+static void ImGui_ImplSDL2_CloseGamepads();
+
+void ImGui_ImplSDL2_Shutdown()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    IM_ASSERT(bd != nullptr && "No platform backend to shutdown, or already shutdown?");
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+
+    ImGui_ImplSDL2_ShutdownMultiViewportSupport();
+    ImGui_ImplSDL2_TouchStopLongPressTimer(bd);
+    if (bd->ClipboardTextData)
+        SDL_free(bd->ClipboardTextData);
+    for (ImGuiMouseCursor cursor_n = 0; cursor_n < ImGuiMouseCursor_COUNT; cursor_n++)
+        SDL_FreeCursor(bd->MouseCursors[cursor_n]);
+    ImGui_ImplSDL2_CloseGamepads();
+
+    io.BackendPlatformName = nullptr;
+    io.BackendPlatformUserData = nullptr;
+    io.BackendFlags &= ~(ImGuiBackendFlags_HasMouseCursors | ImGuiBackendFlags_HasSetMousePos | ImGuiBackendFlags_HasGamepad | ImGuiBackendFlags_PlatformHasViewports | ImGuiBackendFlags_HasMouseHoveredViewport);
+    platform_io.ClearPlatformHandlers();
+    IM_DELETE(bd);
+}
+
+void ImGui_ImplSDL2_SetMouseCaptureMode(ImGui_ImplSDL2_MouseCaptureMode mode)
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    if (mode == ImGui_ImplSDL2_MouseCaptureMode_Disabled && bd->MouseCaptureMode != ImGui_ImplSDL2_MouseCaptureMode_Disabled)
+        SDL_CaptureMouse(SDL_FALSE);
+    bd->MouseCaptureMode = mode;
+}
+
+// This code is rather messy because some of the functions we need for full viewport support are not available in SDL < 2.0.4.
+static void ImGui_ImplSDL2_UpdateMouseData()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    ImGuiIO& io = ImGui::GetIO();
+
+    // We forward mouse input when hovered or captured (via SDL_MOUSEMOTION) or when focused (below)
+#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE
+    // - SDL_CaptureMouse() let the OS know e.g. that our drags can extend outside of parent boundaries (we want updated position) and shouldn't trigger other operations outside.
+    // - Debuggers under Linux tends to leave captured mouse on break, which may be very inconvenient, so to mitigate the issue on X11 we we wait until mouse has moved to begin capture.
+    // Never capture (grab the pointer) while fingers are on a touchscreen: on X11 this makes us lose FINGERUP events, leaving stale fingers.
+    // Testing for fingers rather than just our emulated button matters, as when a second finger lands the button release we queue is not seen by
+    // imgui until the next NewFrame, so for one frame it can still see a drag in progress.
+    const bool touch_active = (bd->TouchFingers.Size > 0);
+    if (bd->MouseCaptureMode == ImGui_ImplSDL2_MouseCaptureMode_Enabled)
+    {
+        SDL_CaptureMouse((bd->MouseButtonsDown != 0 && !touch_active) ? SDL_TRUE : SDL_FALSE);
+    }
+    else if (bd->MouseCaptureMode == ImGui_ImplSDL2_MouseCaptureMode_EnabledAfterDrag)
+    {
+        bool want_capture = false;
+        for (int button_n = 0; button_n < ImGuiMouseButton_COUNT && !want_capture; button_n++)
+            if (ImGui::IsMouseDragging(button_n, 1.0f))
+                want_capture = true;
+        if (touch_active)
+            want_capture = false;
+        SDL_CaptureMouse(want_capture ? SDL_TRUE : SDL_FALSE);
+    }
+
+    SDL_Window* focused_window = SDL_GetKeyboardFocus();
+    const bool is_app_focused = (focused_window && (bd->Window == focused_window || ImGui_ImplSDL2_GetViewportForWindowID(SDL_GetWindowID(focused_window)) != NULL));
+#else
+    SDL_Window* focused_window = bd->Window;
+    const bool is_app_focused = (SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_INPUT_FOCUS) != 0; // SDL 2.0.3 and non-windowed systems: single-viewport only
+#endif
+
+    if (is_app_focused)
+    {
+        // (Optional) Set OS mouse position from Dear ImGui if requested (rarely used, only when io.ConfigNavMoveSetMousePos is enabled by user)
+        if (io.WantSetMousePos)
+        {
+#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE
+            if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+                SDL_WarpMouseGlobal((int)io.MousePos.x, (int)io.MousePos.y);
+            else
+#endif
+                SDL_WarpMouseInWindow(bd->Window, (int)io.MousePos.x, (int)io.MousePos.y);
+        }
+
+        // (Optional) Fallback to provide unclamped mouse position when focused but not hovered (SDL_MOUSEMOTION already provides this when hovered or captured)
+        // Note that SDL_GetGlobalMouseState() is in theory slow on X11, but this only runs on rather specific cases. If a problem we may provide a way to opt-out this feature.
+        SDL_Window* hovered_window = SDL_GetMouseFocus();
+        const bool is_relative_mouse_mode = SDL_GetRelativeMouseMode() != 0;
+        if (hovered_window == nullptr && bd->MouseCanUseGlobalState && bd->MouseButtonsDown == 0 && !is_relative_mouse_mode)
+        {
+            // Single-viewport mode: mouse position in client window coordinates (io.MousePos is (0,0) when the mouse is on the upper-left corner of the app window)
+            // Multi-viewport mode: mouse position in OS absolute coordinates (io.MousePos is (0,0) when the mouse is on the upper-left of the primary monitor)
+            int mouse_x, mouse_y;
+            int window_x, window_y;
+            SDL_GetGlobalMouseState(&mouse_x, &mouse_y);
+            if (!(io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable))
+            {
+                SDL_GetWindowPosition(focused_window, &window_x, &window_y);
+                mouse_x -= window_x;
+                mouse_y -= window_y;
+            }
+            io.AddMousePosEvent((float)mouse_x, (float)mouse_y);
+        }
+    }
+
+    // (Optional) When using multiple viewports: call io.AddMouseViewportEvent() with the viewport the OS mouse cursor is hovering.
+    // If ImGuiBackendFlags_HasMouseHoveredViewport is not set by the backend, Dear imGui will ignore this field and infer the information using its flawed heuristic.
+    // - [!] SDL backend does NOT correctly ignore viewports with the _NoInputs flag.
+    //       Some backend are not able to handle that correctly. If a backend report an hovered viewport that has the _NoInputs flag (e.g. when dragging a window
+    //       for docking, the viewport has the _NoInputs flag in order to allow us to find the viewport under), then Dear ImGui is forced to ignore the value reported
+    //       by the backend, and use its flawed heuristic to guess the viewport behind.
+    // - [X] SDL backend correctly reports this regardless of another viewport behind focused and dragged from (we need this to find a useful drag and drop target).
+    if (io.BackendFlags & ImGuiBackendFlags_HasMouseHoveredViewport)
+    {
+        ImGuiID mouse_viewport_id = 0;
+        if (ImGuiViewport* mouse_viewport = ImGui_ImplSDL2_GetViewportForWindowID(bd->MouseWindowID))
+            mouse_viewport_id = mouse_viewport->ID;
+        io.AddMouseViewportEvent(mouse_viewport_id);
+    }
+}
+
+static void ImGui_ImplSDL2_UpdateMouseCursor()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.ConfigFlags & ImGuiConfigFlags_NoMouseCursorChange)
+        return;
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+
+    ImGuiMouseCursor imgui_cursor = ImGui::GetMouseCursor();
+    if (io.MouseDrawCursor || imgui_cursor == ImGuiMouseCursor_None)
+    {
+        // Hide OS mouse cursor if imgui is drawing it or if it wants no cursor
+        SDL_ShowCursor(SDL_FALSE);
+    }
+    else
+    {
+        // Show OS mouse cursor
+        SDL_Cursor* expected_cursor = bd->MouseCursors[imgui_cursor] ? bd->MouseCursors[imgui_cursor] : bd->MouseCursors[ImGuiMouseCursor_Arrow];
+        if (bd->MouseLastCursor != expected_cursor)
+        {
+            SDL_SetCursor(expected_cursor); // SDL function doesn't have an early out (see #6113)
+            bd->MouseLastCursor = expected_cursor;
+        }
+        SDL_ShowCursor(SDL_TRUE);
+    }
+}
+
+// - On Windows the process needs to be marked DPI-aware!! SDL2 doesn't do it by default. You can call ::SetProcessDPIAware() or call ImGui_ImplWin32_EnableDpiAwareness() from Win32 backend.
+// - Apple platforms use FramebufferScale so we always return 1.0f.
+// - Some accessibility applications are declaring virtual monitors with a DPI of 0.0f, see #7902. We preserve this value for caller to handle.
+float ImGui_ImplSDL2_GetContentScaleForWindow(SDL_Window* window)
+{
+    return ImGui_ImplSDL2_GetContentScaleForDisplay(SDL_GetWindowDisplayIndex(window));
+}
+
+#if defined(SDL_VIDEO_DRIVER_X11) && defined(__linux__)
+// SDL2 on X11 derives DPI from the monitor's physical size (XRandR mm), which ignores the user's desktop scaling
+// setting and fails outright when the size is reported as 0mm (VMs, some KVMs/adapters).
+// GLFW instead uses the Xft.dpi X resource (what desktop environments set for UI scaling). Do the same here,
+// but first check XSETTINGS: Xfce scales GTK with Gdk/WindowScalingFactor and leaves Xft.dpi unscaled (96),
+// so Xft.dpi alone gives 1.0 there.
+
+// Reads Gdk/WindowScalingFactor, Gdk/UnscaledDPI and Xft/DPI from the XSETTINGS manager (xfsettingsd,
+// gsd-xsettings, ...). Returns the content scale the same way GTK3 computes it (window scale * unscaled DPI / 96),
+// or 0.0f if there is no XSETTINGS manager or it doesn't publish a window scaling factor.
+static float ImGui_ImplSDL2_GetX11XSettingsScale(Display* display)
+{
+    char selection_name[32];
+    snprintf(selection_name, sizeof(selection_name), "_XSETTINGS_S%d", DefaultScreen(display));
+    Window owner = XGetSelectionOwner(display, XInternAtom(display, selection_name, False));
+    if (owner == None)
+        return 0.0f;
+    Atom settings_atom = XInternAtom(display, "_XSETTINGS_SETTINGS", False);
+    Atom type;
+    int format;
+    unsigned long count, remaining;
+    unsigned char* data = nullptr;
+    if (XGetWindowProperty(display, owner, settings_atom, 0, 0x7fffffff, False, settings_atom,
+                           &type, &format, &count, &remaining, &data) != Success || data == nullptr)
+        return 0.0f;
+
+    // Format (XSETTINGS spec): byte-order CARD8, 3 pad, serial CARD32, n-settings CARD32, then per setting:
+    // type CARD8 (0 = int, 1 = string, 2 = color), pad, name-len CARD16, name padded to 4, last-change CARD32, value
+    const bool swap = (data[0] == 1) != (SDL_BYTEORDER == SDL_BIG_ENDIAN);
+    auto card16 = [&](const unsigned char* p) { Uint16 v; memcpy(&v, p, 2); return swap ? SDL_Swap16(v) : v; };
+    auto card32 = [&](const unsigned char* p) { Uint32 v; memcpy(&v, p, 4); return swap ? SDL_Swap32(v) : v; };
+    auto pad4 = [](size_t n) { return (n + 3) & ~(size_t)3; };
+
+    int window_scale = 0, unscaled_dpi = 0, xft_dpi = 0;     // DPI values are in 1/1024ths
+    const unsigned char* end = data + count;
+    const unsigned char* p = data + 12;
+    for (Uint32 n = (count >= 12) ? card32(data + 8) : 0; n > 0 && p + 4 <= end; n--)
+    {
+        int setting_type = p[0];
+        size_t name_len = card16(p + 2);
+        const unsigned char* name = p + 4;
+        p += 4 + pad4(name_len) + 4;
+        size_t value_len = (setting_type == 0) ? 4 : (setting_type == 2) ? 8 : (p + 4 <= end) ? 4 + pad4(card32(p)) : 0;
+        if (value_len == 0 || p + value_len > end)
+            break;
+        if (setting_type == 0)
+        {
+            int value = (int)card32(p);
+            if (name_len == 23 && memcmp(name, "Gdk/WindowScalingFactor", 23) == 0) window_scale = value;
+            else if (name_len == 15 && memcmp(name, "Gdk/UnscaledDPI", 15) == 0)    unscaled_dpi = value;
+            else if (name_len == 7 && memcmp(name, "Xft/DPI", 7) == 0)              xft_dpi = value;
+        }
+        p += value_len;
+    }
+    XFree(data);
+
+    if (window_scale <= 0)
+        return 0.0f;
+    // GNOME publishes Xft/DPI already multiplied by the window scale, plus Gdk/UnscaledDPI; Xfce only Xft/DPI (unscaled)
+    int dpi = (unscaled_dpi > 0) ? unscaled_dpi : xft_dpi;
+    return (dpi > 0) ? window_scale * (dpi / 1024.0f) / 96.0f : (float)window_scale;
+}
+
+// Returns the desktop's content scale from XSETTINGS or the Xft.dpi resource, or 0.0f if neither is available.
+static float ImGui_ImplSDL2_GetX11ContentScale()
+{
+    Display* display = XOpenDisplay(nullptr);
+    if (display == nullptr)
+        return 0.0f;
+    float scale = ImGui_ImplSDL2_GetX11XSettingsScale(display);
+    if (scale > 0.0f)
+    {
+        XCloseDisplay(display);
+        return scale;
+    }
+    float dpi = 0.0f;
+    if (const char* resources = XResourceManagerString(display))
+    {
+        // Entries look like "Xft.dpi:\t192", one per line
+        for (const char* p = resources; p != nullptr && *p != 0; )
+        {
+            if (strncmp(p, "Xft.dpi:", 8) == 0)
+            {
+                dpi = (float)atof(p + 8);
+                break;
+            }
+            p = strchr(p, '\n');
+            if (p != nullptr)
+                p++;
+        }
+    }
+    XCloseDisplay(display);
+    return dpi / 96.0f;
+}
+#endif
+
+// SDL_GetDisplayDPI() seems rather unreliable on Linux.
+float ImGui_ImplSDL2_GetContentScaleForDisplay(int display_index)
+{
+    const char* sdl_driver = SDL_GetCurrentVideoDriver();
+    if (sdl_driver && strcmp(sdl_driver, "wayland") == 0)
+        return 1.0f;
+#if defined(SDL_VIDEO_DRIVER_X11) && defined(__linux__)
+    if (sdl_driver && strcmp(sdl_driver, "x11") == 0)
+    {
+        // Prefer the desktop's configured scale (matches GLFW behavior), falling back to SDL below
+        const float scale = ImGui_ImplSDL2_GetX11ContentScale();
+        if (scale > 0.0f)
+            return (scale < 1.0f) ? 1.0f : scale;
+    }
+#endif
+#if SDL_HAS_PER_MONITOR_DPI
+#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+    float dpi = 0.0f;
+    if (SDL_GetDisplayDPI(display_index, &dpi, nullptr, nullptr) == 0)
+    {
+        if (dpi < 96.0f)
+            dpi = 96.0f;
+        return dpi / 96.0f;
+    }
+#endif
+#endif
+    IM_UNUSED(display_index);
+    return 1.0f;
+}
+
+static void ImGui_ImplSDL2_CloseGamepads()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    if (bd->GamepadMode != ImGui_ImplSDL2_GamepadMode_Manual)
+        for (SDL_GameController* gamepad : bd->Gamepads)
+            SDL_GameControllerClose(gamepad);
+    bd->Gamepads.resize(0);
+}
+
+void ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode mode, struct _SDL_GameController** manual_gamepads_array, int manual_gamepads_count)
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    ImGui_ImplSDL2_CloseGamepads();
+    if (mode == ImGui_ImplSDL2_GamepadMode_Manual)
+    {
+        IM_ASSERT(manual_gamepads_array != nullptr || manual_gamepads_count <= 0);
+        for (int n = 0; n < manual_gamepads_count; n++)
+            bd->Gamepads.push_back(manual_gamepads_array[n]);
+    }
+    else
+    {
+        IM_ASSERT(manual_gamepads_array == nullptr && manual_gamepads_count <= 0);
+        bd->WantUpdateGamepadsList = true;
+    }
+    bd->GamepadMode = mode;
+}
+
+static void ImGui_ImplSDL2_UpdateGamepadButton(ImGui_ImplSDL2_Data* bd, ImGuiIO& io, ImGuiKey key, SDL_GameControllerButton button_no)
+{
+    bool merged_value = false;
+    for (SDL_GameController* gamepad : bd->Gamepads)
+        merged_value |= SDL_GameControllerGetButton(gamepad, button_no) != 0;
+    io.AddKeyEvent(key, merged_value);
+}
+
+static inline float Saturate(float v) { return v < 0.0f ? 0.0f : v  > 1.0f ? 1.0f : v; }
+static void ImGui_ImplSDL2_UpdateGamepadAnalog(ImGui_ImplSDL2_Data* bd, ImGuiIO& io, ImGuiKey key, SDL_GameControllerAxis axis_no, float v0, float v1)
+{
+    float merged_value = 0.0f;
+    for (SDL_GameController* gamepad : bd->Gamepads)
+    {
+        float vn = Saturate((float)(SDL_GameControllerGetAxis(gamepad, axis_no) - v0) / (float)(v1 - v0));
+        if (merged_value < vn)
+            merged_value = vn;
+    }
+    io.AddKeyAnalogEvent(key, merged_value > 0.1f, merged_value);
+}
+
+static void ImGui_ImplSDL2_UpdateGamepads()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Update list of controller(s) to use
+    if (bd->WantUpdateGamepadsList && bd->GamepadMode != ImGui_ImplSDL2_GamepadMode_Manual)
+    {
+        ImGui_ImplSDL2_CloseGamepads();
+        int joystick_count = SDL_NumJoysticks();
+        for (int n = 0; n < joystick_count; n++)
+            if (SDL_IsGameController(n))
+                if (SDL_GameController* gamepad = SDL_GameControllerOpen(n))
+                {
+                    bd->Gamepads.push_back(gamepad);
+                    if (bd->GamepadMode == ImGui_ImplSDL2_GamepadMode_AutoFirst)
+                        break;
+                }
+        bd->WantUpdateGamepadsList = false;
+    }
+
+    io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    if (bd->Gamepads.Size == 0)
+        return;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+
+    // Update gamepad inputs
+    const int thumb_dead_zone = 8000; // SDL_gamecontroller.h suggests using this value.
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadStart,       SDL_CONTROLLER_BUTTON_START);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadBack,        SDL_CONTROLLER_BUTTON_BACK);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceLeft,    SDL_CONTROLLER_BUTTON_X);              // Xbox X, PS Square
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceRight,   SDL_CONTROLLER_BUTTON_B);              // Xbox B, PS Circle
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceUp,      SDL_CONTROLLER_BUTTON_Y);              // Xbox Y, PS Triangle
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceDown,    SDL_CONTROLLER_BUTTON_A);              // Xbox A, PS Cross
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadLeft,    SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadRight,   SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadUp,      SDL_CONTROLLER_BUTTON_DPAD_UP);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadDown,    SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadL1,          SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadR1,          SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadL2,          SDL_CONTROLLER_AXIS_TRIGGERLEFT,  0.0f, 32767);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadR2,          SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 0.0f, 32767);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadL3,          SDL_CONTROLLER_BUTTON_LEFTSTICK);
+    ImGui_ImplSDL2_UpdateGamepadButton(bd, io, ImGuiKey_GamepadR3,          SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadLStickLeft,  SDL_CONTROLLER_AXIS_LEFTX,  -thumb_dead_zone, -32768);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadLStickRight, SDL_CONTROLLER_AXIS_LEFTX,  +thumb_dead_zone, +32767);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadLStickUp,    SDL_CONTROLLER_AXIS_LEFTY,  -thumb_dead_zone, -32768);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadLStickDown,  SDL_CONTROLLER_AXIS_LEFTY,  +thumb_dead_zone, +32767);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadRStickLeft,  SDL_CONTROLLER_AXIS_RIGHTX, -thumb_dead_zone, -32768);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadRStickRight, SDL_CONTROLLER_AXIS_RIGHTX, +thumb_dead_zone, +32767);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadRStickUp,    SDL_CONTROLLER_AXIS_RIGHTY, -thumb_dead_zone, -32768);
+    ImGui_ImplSDL2_UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadRStickDown,  SDL_CONTROLLER_AXIS_RIGHTY, +thumb_dead_zone, +32767);
+}
+
+// FIXME: Note that doesn't update with DPI/Scaling change only as SDL2 doesn't have an event for it (SDL3 has).
+static void ImGui_ImplSDL2_UpdateMonitors()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    platform_io.Monitors.resize(0);
+    bd->WantUpdateMonitors = false;
+    int display_count = SDL_GetNumVideoDisplays();
+    for (int n = 0; n < display_count; n++)
+    {
+        // Warning: the validity of monitor DPI information on Windows depends on the application DPI awareness settings, which generally needs to be set in the manifest or at runtime.
+        ImGuiPlatformMonitor monitor;
+        SDL_Rect r;
+        SDL_GetDisplayBounds(n, &r);
+        monitor.MainPos = monitor.WorkPos = ImVec2((float)r.x, (float)r.y);
+        monitor.MainSize = monitor.WorkSize = ImVec2((float)r.w, (float)r.h);
+#if SDL_HAS_USABLE_DISPLAY_BOUNDS
+        if (SDL_GetDisplayUsableBounds(n, &r) == 0 && r.w > 0 && r.h > 0)
+        {
+            monitor.WorkPos = ImVec2((float)r.x, (float)r.y);
+            monitor.WorkSize = ImVec2((float)r.w, (float)r.h);
+        }
+#endif
+        float dpi_scale = ImGui_ImplSDL2_GetContentScaleForDisplay(n);
+        if (dpi_scale <= 0.0f)
+            continue; // Some accessibility applications are declaring virtual monitors with a DPI of 0, see #7902.
+        monitor.DpiScale = dpi_scale;
+        monitor.PlatformHandle = (void*)(intptr_t)n;
+        platform_io.Monitors.push_back(monitor);
+    }
+}
+
+static void ImGui_ImplSDL2_GetWindowSizeAndFramebufferScale(SDL_Window* window, SDL_Renderer* renderer, ImVec2* out_size, ImVec2* out_framebuffer_scale)
+{
+    int w, h;
+    int display_w, display_h;
+    SDL_GetWindowSize(window, &w, &h);
+    if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)
+        w = h = 0;
+    if (renderer != nullptr)
+        SDL_GetRendererOutputSize(renderer, &display_w, &display_h);
+#if SDL_HAS_VULKAN
+    else if (SDL_GetWindowFlags(window) & SDL_WINDOW_VULKAN)
+        SDL_Vulkan_GetDrawableSize(window, &display_w, &display_h);
+#endif
+    else
+        SDL_GL_GetDrawableSize(window, &display_w, &display_h);
+    if (out_size != nullptr)
+        *out_size = ImVec2((float)w, (float)h);
+    if (out_framebuffer_scale != nullptr)
+        *out_framebuffer_scale = (w > 0 && h > 0) ? ImVec2((float)display_w / (float)w, (float)display_h / (float)h) : ImVec2(1.0f, 1.0f);
+}
+
+// Movement of the midpoint between the first two fingers during the last frame, while two or more fingers are down on a touchscreen.
+// Zero otherwise. Applications can use it to pan along with pinch zoom.
+ImVec2 ImGui_ImplSDL2_GetTouchPanDelta()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    return bd ? bd->PinchPanDelta : ImVec2(0.0f, 0.0f);
+}
+
+void ImGui_ImplSDL2_NewFrame()
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    IM_ASSERT(bd != nullptr && "Context or backend not initialized! Did you call ImGui_ImplSDL2_Init()?");
+    ImGuiIO& io = ImGui::GetIO();
+
+    ImGui_ImplSDL2_PinchFlush(bd, io);
+    ImGui_ImplSDL2_TouchUpdate(bd, io);
+    bd->PinchPanDelta = bd->PinchPanAccum;
+    bd->PinchPanAccum = ImVec2(0.0f, 0.0f);
+
+    // Setup main viewport size (every frame to accommodate for window resizing)
+    ImGui_ImplSDL2_GetWindowSizeAndFramebufferScale(bd->Window, bd->Renderer, &io.DisplaySize, &io.DisplayFramebufferScale);
+
+    // Update monitors
+#ifdef WIN32
+    bd->WantUpdateMonitors = true; // Keep polling under Windows to handle changes of work area when resizing task-bar (#8415)
+#endif
+    if (bd->WantUpdateMonitors)
+        ImGui_ImplSDL2_UpdateMonitors();
+
+    // Setup time step (we don't use SDL_GetTicks() because it is using millisecond resolution)
+    // (Accept SDL_GetPerformanceCounter() not returning a monotonically increasing value. Happens in VMs and Emscripten, see #6189, #6114, #3644)
+    static Uint64 frequency = SDL_GetPerformanceFrequency();
+    Uint64 current_time = SDL_GetPerformanceCounter();
+    if (current_time <= bd->Time)
+        current_time = bd->Time + 1;
+    io.DeltaTime = bd->Time > 0 ? (float)((double)(current_time - bd->Time) / (double)frequency) : (float)(1.0f / 60.0f);
+    bd->Time = current_time;
+    bd->FrameTicks = SDL_GetTicks();
+
+    if (bd->MouseLastLeaveFrame && bd->MouseLastLeaveFrame >= ImGui::GetFrameCount() && bd->MouseButtonsDown == 0)
+    {
+        bd->MouseWindowID = 0;
+        bd->MouseLastLeaveFrame = 0;
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+    }
+
+    // Our io.AddMouseViewportEvent() calls will only be valid when not capturing.
+    // Technically speaking testing for 'bd->MouseButtonsDown == 0' would be more rigorous, but testing for payload reduces noise and potential side-effects.
+    if (bd->MouseCanReportHoveredViewport && ImGui::GetDragDropPayload() == nullptr)
+        io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport;
+    else
+        io.BackendFlags &= ~ImGuiBackendFlags_HasMouseHoveredViewport;
+
+    ImGui_ImplSDL2_UpdateMouseData();
+    ImGui_ImplSDL2_UpdateMouseCursor();
+
+    // Update game controllers (if enabled and available)
+    ImGui_ImplSDL2_UpdateGamepads();
+}
+
+//--------------------------------------------------------------------------------------------------------
+// MULTI-VIEWPORT / PLATFORM INTERFACE SUPPORT
+// This is an _advanced_ and _optional_ feature, allowing the backend to create and handle multiple viewports simultaneously.
+// If you are new to dear imgui or creating a new binding for dear imgui, it is recommended that you completely ignore this section first..
+//--------------------------------------------------------------------------------------------------------
+
+// Helper structure we store in the void* PlatformUserData field of each ImGuiViewport to easily retrieve our backend data.
+struct ImGui_ImplSDL2_ViewportData
+{
+    SDL_Window*     Window;
+    Uint32          WindowID;       // Stored in ImGuiViewport::PlatformHandle. Use SDL_GetWindowFromID() to get SDL_Window* from Uint32 WindowID.
+    bool            WindowOwned;
+    SDL_GLContext   GLContext;
+
+    ImGui_ImplSDL2_ViewportData()   { Window = nullptr; WindowID = 0; WindowOwned = false; GLContext = nullptr; }
+    ~ImGui_ImplSDL2_ViewportData()  { IM_ASSERT(Window == nullptr && GLContext == nullptr); }
+};
+
+static void ImGui_ImplSDL2_CreateWindow(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+    ImGui_ImplSDL2_ViewportData* vd = IM_NEW(ImGui_ImplSDL2_ViewportData)();
+    viewport->PlatformUserData = vd;
+
+    ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+    ImGui_ImplSDL2_ViewportData* main_viewport_data = (ImGui_ImplSDL2_ViewportData*)main_viewport->PlatformUserData;
+
+    // Share GL resources with main context
+    bool use_opengl = (main_viewport_data->GLContext != nullptr);
+    SDL_GLContext backup_context = nullptr;
+    if (use_opengl)
+    {
+        backup_context = SDL_GL_GetCurrentContext();
+        SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+        SDL_GL_MakeCurrent(main_viewport_data->Window, main_viewport_data->GLContext);
+    }
+
+    Uint32 sdl_flags = 0;
+    sdl_flags |= use_opengl ? SDL_WINDOW_OPENGL : (bd->UseVulkan ? SDL_WINDOW_VULKAN : 0);
+    sdl_flags |= SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_ALLOW_HIGHDPI;
+    sdl_flags |= SDL_WINDOW_HIDDEN;
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoDecoration) ? SDL_WINDOW_BORDERLESS : 0;
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoDecoration) ? 0 : SDL_WINDOW_RESIZABLE;
+#if !defined(_WIN32)
+    // See SDL hack in ImGui_ImplSDL2_ShowWindow().
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon) ? SDL_WINDOW_SKIP_TASKBAR : 0;
+    // Skip-taskbar alone leaves an X11 window in the window switcher (e.g. KDE Alt+Tab); a utility window type keeps it out.
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon) ? SDL_WINDOW_UTILITY : 0;
+#endif
+#if SDL_HAS_ALWAYS_ON_TOP
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_TopMost) ? SDL_WINDOW_ALWAYS_ON_TOP : 0;
+#endif
+    vd->Window = SDL_CreateWindow("No Title Yet", (int)viewport->Pos.x, (int)viewport->Pos.y, (int)viewport->Size.x, (int)viewport->Size.y, sdl_flags);
+    vd->WindowOwned = true;
+#if !defined(_WIN32)
+    // Make windows without a taskbar icon transient for the main window (WM_TRANSIENT_FOR on X11, xdg parent on Wayland),
+    // so the window manager raises and minimizes them together with it.
+    if (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon)
+        SDL_SetWindowModalFor(vd->Window, bd->Window);
+#endif
+    if (use_opengl)
+    {
+        vd->GLContext = SDL_GL_CreateContext(vd->Window);
+        SDL_GL_SetSwapInterval(0);
+    }
+    if (use_opengl && backup_context)
+        SDL_GL_MakeCurrent(vd->Window, backup_context);
+
+    viewport->PlatformHandle = (void*)(intptr_t)SDL_GetWindowID(vd->Window);
+    viewport->PlatformHandleRaw = nullptr;
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(vd->Window, &info))
+    {
+#if defined(SDL_VIDEO_DRIVER_WINDOWS)
+        viewport->PlatformHandleRaw = info.info.win.window;
+#elif defined(__APPLE__) && defined(SDL_VIDEO_DRIVER_COCOA)
+        viewport->PlatformHandleRaw = (void*)info.info.cocoa.window;
+#endif
+    }
+}
+
+static void ImGui_ImplSDL2_DestroyWindow(ImGuiViewport* viewport)
+{
+    if (ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData)
+    {
+        if (vd->GLContext && vd->WindowOwned)
+            SDL_GL_DeleteContext(vd->GLContext);
+        if (vd->Window && vd->WindowOwned)
+            SDL_DestroyWindow(vd->Window);
+        vd->GLContext = nullptr;
+        vd->Window = nullptr;
+        IM_DELETE(vd);
+    }
+    viewport->PlatformUserData = viewport->PlatformHandle = nullptr;
+}
+
+static void ImGui_ImplSDL2_ShowWindow(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+#if defined(_WIN32) && !(defined(WINAPI_FAMILY) && ((defined(WINAPI_FAMILY_APP) && WINAPI_FAMILY == WINAPI_FAMILY_APP) || (defined(WINAPI_FAMILY_GAMES) && WINAPI_FAMILY == WINAPI_FAMILY_GAMES)))
+    HWND hwnd = (HWND)viewport->PlatformHandleRaw;
+
+    // SDL hack: Hide icon from task bar
+    // Note: SDL 2.0.6+ has a SDL_WINDOW_SKIP_TASKBAR flag which is supported under Windows but the way it create the window breaks our seamless transition.
+    if (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon)
+    {
+        LONG ex_style = ::GetWindowLong(hwnd, GWL_EXSTYLE);
+        ex_style &= ~WS_EX_APPWINDOW;
+        ex_style |= WS_EX_TOOLWINDOW;
+        ::SetWindowLong(hwnd, GWL_EXSTYLE, ex_style);
+        // Owned windows stay above their owner and are minimized/restored with it
+        ::SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, (LONG_PTR)ImGui::GetMainViewport()->PlatformHandleRaw);
+    }
+#endif
+
+#if SDL_HAS_SHOW_WINDOW_ACTIVATION_HINT
+    SDL_SetHint(SDL_HINT_WINDOW_NO_ACTIVATION_WHEN_SHOWN, (viewport->Flags & ImGuiViewportFlags_NoFocusOnAppearing) ? "1" : "0");
+#elif defined(_WIN32)
+    // SDL hack: SDL always activate/focus windows :/
+    if (viewport->Flags & ImGuiViewportFlags_NoFocusOnAppearing)
+    {
+        ::ShowWindow(hwnd, SW_SHOWNA);
+        return;
+    }
+#endif
+    SDL_ShowWindow(vd->Window);
+}
+
+static ImVec2 ImGui_ImplSDL2_GetWindowPos(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    int x = 0, y = 0;
+    SDL_GetWindowPosition(vd->Window, &x, &y);
+    return ImVec2((float)x, (float)y);
+}
+
+static void ImGui_ImplSDL2_SetWindowPos(ImGuiViewport* viewport, ImVec2 pos)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    SDL_SetWindowPosition(vd->Window, (int)pos.x, (int)pos.y);
+}
+
+static ImVec2 ImGui_ImplSDL2_GetWindowSize(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    int w = 0, h = 0;
+    SDL_GetWindowSize(vd->Window, &w, &h);
+    return ImVec2((float)w, (float)h);
+}
+
+static void ImGui_ImplSDL2_SetWindowSize(ImGuiViewport* viewport, ImVec2 size)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    SDL_SetWindowSize(vd->Window, (int)size.x, (int)size.y);
+}
+
+static ImVec2 ImGui_ImplSDL2_GetWindowFramebufferScale(ImGuiViewport* viewport)
+{
+    // FIXME: SDL_Renderer does not support multi-viewport.
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    ImVec2 framebuffer_scale;
+    ImGui_ImplSDL2_GetWindowSizeAndFramebufferScale(vd->Window, nullptr, nullptr, &framebuffer_scale);
+    return framebuffer_scale;
+}
+
+static void ImGui_ImplSDL2_SetWindowTitle(ImGuiViewport* viewport, const char* title)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    SDL_SetWindowTitle(vd->Window, title);
+}
+
+#if SDL_HAS_WINDOW_ALPHA
+static void ImGui_ImplSDL2_SetWindowAlpha(ImGuiViewport* viewport, float alpha)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    SDL_SetWindowOpacity(vd->Window, alpha);
+}
+#endif
+
+static void ImGui_ImplSDL2_SetWindowFocus(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    SDL_RaiseWindow(vd->Window);
+}
+
+static bool ImGui_ImplSDL2_GetWindowFocus(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    return (SDL_GetWindowFlags(vd->Window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+}
+
+static bool ImGui_ImplSDL2_GetWindowMinimized(ImGuiViewport* viewport)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    return (SDL_GetWindowFlags(vd->Window) & SDL_WINDOW_MINIMIZED) != 0;
+}
+
+static void ImGui_ImplSDL2_RenderWindow(ImGuiViewport* viewport, void*)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    if (vd->GLContext)
+        SDL_GL_MakeCurrent(vd->Window, vd->GLContext);
+}
+
+static void ImGui_ImplSDL2_SwapBuffers(ImGuiViewport* viewport, void*)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    if (vd->GLContext)
+    {
+        SDL_GL_MakeCurrent(vd->Window, vd->GLContext);
+        SDL_GL_SwapWindow(vd->Window);
+    }
+}
+
+// Vulkan support (the Vulkan renderer needs to call a platform-side support function to create the surface)
+// SDL is graceful enough to _not_ need <vulkan/vulkan.h> so we can safely include this.
+#if SDL_HAS_VULKAN
+#include <SDL_vulkan.h>
+static int ImGui_ImplSDL2_CreateVkSurface(ImGuiViewport* viewport, ImU64 vk_instance, const void* vk_allocator, ImU64* out_vk_surface)
+{
+    ImGui_ImplSDL2_ViewportData* vd = (ImGui_ImplSDL2_ViewportData*)viewport->PlatformUserData;
+    (void)vk_allocator;
+    SDL_bool ret = SDL_Vulkan_CreateSurface(vd->Window, (VkInstance)vk_instance, (VkSurfaceKHR*)out_vk_surface);
+    return ret ? 0 : 1; // ret ? VK_SUCCESS : VK_NOT_READY
+}
+#endif // SDL_HAS_VULKAN
+
+static void ImGui_ImplSDL2_InitMultiViewportSupport(SDL_Window* window, void* sdl_gl_context)
+{
+    // Register platform interface (will be coupled with a renderer interface)
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    platform_io.Platform_CreateWindow = ImGui_ImplSDL2_CreateWindow;
+    platform_io.Platform_DestroyWindow = ImGui_ImplSDL2_DestroyWindow;
+    platform_io.Platform_ShowWindow = ImGui_ImplSDL2_ShowWindow;
+    platform_io.Platform_SetWindowPos = ImGui_ImplSDL2_SetWindowPos;
+    platform_io.Platform_GetWindowPos = ImGui_ImplSDL2_GetWindowPos;
+    platform_io.Platform_SetWindowSize = ImGui_ImplSDL2_SetWindowSize;
+    platform_io.Platform_GetWindowSize = ImGui_ImplSDL2_GetWindowSize;
+    platform_io.Platform_GetWindowFramebufferScale = ImGui_ImplSDL2_GetWindowFramebufferScale;
+    platform_io.Platform_SetWindowFocus = ImGui_ImplSDL2_SetWindowFocus;
+    platform_io.Platform_GetWindowFocus = ImGui_ImplSDL2_GetWindowFocus;
+    platform_io.Platform_GetWindowMinimized = ImGui_ImplSDL2_GetWindowMinimized;
+    platform_io.Platform_SetWindowTitle = ImGui_ImplSDL2_SetWindowTitle;
+    platform_io.Platform_RenderWindow = ImGui_ImplSDL2_RenderWindow;
+    platform_io.Platform_SwapBuffers = ImGui_ImplSDL2_SwapBuffers;
+#if SDL_HAS_WINDOW_ALPHA
+    platform_io.Platform_SetWindowAlpha = ImGui_ImplSDL2_SetWindowAlpha;
+#endif
+#if SDL_HAS_VULKAN
+    platform_io.Platform_CreateVkSurface = ImGui_ImplSDL2_CreateVkSurface;
+#endif
+
+    // Register main window handle (which is owned by the main application, not by us)
+    // This is mostly for simplicity and consistency, so that our code (e.g. mouse handling etc.) can use same logic for main and secondary viewports.
+    ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+    ImGui_ImplSDL2_ViewportData* vd = IM_NEW(ImGui_ImplSDL2_ViewportData)();
+    vd->Window = window;
+    vd->WindowID = SDL_GetWindowID(window);
+    vd->WindowOwned = false;
+    vd->GLContext = sdl_gl_context;
+    main_viewport->PlatformUserData = vd;
+    main_viewport->PlatformHandle = (void*)(intptr_t)vd->WindowID;
+}
+
+static void ImGui_ImplSDL2_ShutdownMultiViewportSupport()
+{
+    ImGui::DestroyPlatformWindows();
+}
+
+//-----------------------------------------------------------------------------
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+#endif // #ifndef IMGUI_DISABLE
