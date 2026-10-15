@@ -106,6 +106,7 @@ Session::Session(MainWindow* wnd)
 	, m_tPrimaryTrigger(0)
 	, m_triggerArmed(false)
 	, m_triggerOneShot(false)
+	, m_triggerType(TriggerGroup::TRIGGER_TYPE_NORMAL)
 	, m_graphExecutor(4)
 	, m_lastFilterGraphExecTime(0)
 	, m_history(*this)
@@ -3383,6 +3384,7 @@ void Session::ArmTrigger(TriggerGroup::TriggerType type, bool all)
 
 	bool oneshot = (type == TriggerGroup::TRIGGER_TYPE_FORCED) || (type == TriggerGroup::TRIGGER_TYPE_SINGLE);
 	m_triggerOneShot = oneshot;
+	m_triggerType = type;
 
 	if(!HasOnlineScopes())
 	{

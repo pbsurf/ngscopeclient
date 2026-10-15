@@ -842,6 +842,18 @@ void PreferenceManager::InitializeDefaults()
 					"Polling timeout for event loop in power-optimized mode.\n\n"
 					"Longer timeout values reduce power consumption, but also slows display updates.\n")
 				);
+		auto& acq = pwr.AddCategory("Acquisition");
+			acq.AddPreference(
+				Preference::Bool("pause_when_minimized", false)
+				.Label("Pause acquisition when minimized")
+				.Description(
+					"Stop the trigger while the ngscopeclient window is minimized, and restart it in the same\n"
+					"mode (normal or auto) when the window is restored.\n"
+					"\n"
+					"Only a running trigger is paused; a pending single-shot acquisition carries on. Windows\n"
+					"dragged outside the main window count too: acquisition pauses only once none of them\n"
+					"are on screen."
+					));
 
 
 	/*

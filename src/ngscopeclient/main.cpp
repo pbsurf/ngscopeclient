@@ -376,6 +376,8 @@ int main(int argc, char* argv[])
 		const int hiddenPollMs = 250;
 		int settleFramesLeft = 0;
 		Uint32 lastEventTicks = 0;
+		bool pausedWhileMinimized = false;
+		auto pausedTriggerType = TriggerGroup::TRIGGER_TYPE_NORMAL;
 
 		HTTPExportServer::Get().SetTriggerRequestCallback(WakeMainLoop);
 
@@ -387,6 +389,21 @@ int main(int argc, char* argv[])
 			//How long to wait for an event before going on (negative = don't wait)
 			int timeoutMs = -1;
 			bool hidden = g_mainWindow->IsHidden();
+
+			//Pause a running acquisition while minimized if the user asked for that, and restart it on restore
+			if(hidden && session.IsTriggerRunning() &&
+				session.GetPreferences().GetBool("Power.Acquisition.pause_when_minimized"))
+			{
+				pausedTriggerType = session.GetTriggerType();
+				session.StopTrigger();
+				pausedWhileMinimized = true;
+			}
+			else if(!hidden && pausedWhileMinimized)
+			{
+				session.ArmTrigger(pausedTriggerType);
+				pausedWhileMinimized = false;
+			}
+
 			if(hidden)
 				timeoutMs = hiddenPollMs;
 

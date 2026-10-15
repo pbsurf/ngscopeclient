@@ -143,6 +143,11 @@ public:
 	///@brief True if the trigger is armed in a repeating mode (normal or auto), so new waveforms keep arriving
 	bool IsTriggerRunning()
 	{ return m_triggerArmed && !m_triggerOneShot; }
+
+	///@brief Type of the most recent ArmTrigger() call
+	TriggerGroup::TriggerType GetTriggerType()
+	{ return m_triggerType; }
+
 	bool HasOnlineScopes();
 	void DownloadWaveforms();
 	bool CheckForWaveforms(vk::raii::CommandBuffer& cmdbuf);
@@ -555,6 +560,9 @@ protected:
 
 	///@brief If true, trigger is currently armed in single-shot mode
 	bool m_triggerOneShot;
+
+	///@brief Type of the most recent ArmTrigger() call
+	TriggerGroup::TriggerType m_triggerType;
 
 	///@brief Context for filter graph evaluation
 	FilterGraphExecutor m_graphExecutor;
