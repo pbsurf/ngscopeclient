@@ -2,6 +2,8 @@
 
 This is a fork of [ngscopeclient/scopehal-apps](https://github.com/ngscopeclient/scopehal-apps).  Due to the use of AI here, forks of this repo should not submit pull requests to the original ngscopeclient.
 
+Our forks of scopehal, logtools, imgui, imgui-node-editor and the manual text are combined into this one repository, in the directories where their submodules were. `scripts/sync-upstream.sh` merges in upstream changes.
+
 **New features**
 
 * SDR support for AD936x radios (ADALM-PLUTO etc.) via optional [libiio](https://github.com/analogdevicesinc/libiio): RX frequency, bandwidth, sample rate and gain
@@ -13,6 +15,20 @@ This is a fork of [ngscopeclient/scopehal-apps](https://github.com/ngscopeclient
 * Windowing and input ported from GLFW to SDL2, enabling touch input support
 * Up/Down in numeric boxes steps the digit left of the cursor
 * Recent Instruments section in Manage Instruments
+* HTTP Export filter: serves scalar values and analog waveforms (JSON, CSV or NumPy) over HTTP, and lets clients trigger acquisitions
+* Peak Select filter: outputs the frequency, level and FWHM of one detected peak as scalars, chosen by rank, within a range of a target, or nearest to it
+* Sessions can be saved as a single `.scopearchive` (zip) file, or as a `.scopeconfig` without waveform data; option to save the configuration on exit
+* Native Windows build with MSVC (vcpkg manifest and CMake presets), including the AVX code paths
+* CLIP indicator next to a waveform's button when it, or anything feeding it through filters, is clipping
+* Fixed divisions grid mode, like a scope's graticule; optional vertical grid, dashed grid lines and compact axes
+* Ctrl+mouse wheel zooms in 1-2-5 steps per division, and dragging the Y axis offset snaps to 1/5 division (hold Shift for continuous)
+* Per-stream display colors, such as separate colors for I and Q
+* Touchscreen: pinch zoom and pan in the filter graph, tap one port then another to connect them, double tap and drag to zoom a plot, two finger scrolling in windows
+* SDR level correction: receive gain taken out of the I/Q samples, external gain, and a calibration file (text or JSON, which can also be pasted in place of the path)
+* SDR: optional RSSI scalar stream, Sweep toggle with a settable sweep step, and the transmit LO can be driven from the filter graph
+* Timeline menu: Go to t = 0, Go to trigger, Zoom to Cursors
+* Markers at the plot edge for spectrum peaks scrolled out of view, and FFT peak labels that hold still on noisy spectra
+* The horizontal view uses double precision, so it can span more than 2.5 hours and cursors work far from t = 0
 
 **Minor features and bug fixes**
 
@@ -31,6 +47,22 @@ This is a fork of [ngscopeclient/scopehal-apps](https://github.com/ngscopeclient
 * Fixed empty saved font paths overriding the default fonts
 * Build: slimmer `scopehal.h` for in-tree builds, so changing a rarely used header rebuilds far fewer files
 * Build: [mold](https://github.com/rui314/mold) linker used when installed
+* Values limited by the instrument while stepping keep their prefix and step size; clicking a drag field or slider lets the arrow keys step it
+* Unit formatting uses all SI prefixes for small values and no prefix for zero, and several parsing bugs are fixed
+* Window startup mode defaults to Last State, so the window comes back where it was
+* Uncapped framerate toggle in Performance Metrics, for benchmarking
+* The IIO mock radio loops transmit back to receive, with realistic signal levels and noise, for testing without hardware
+* The demo oscilloscope has an edge trigger and trigger offset
+* The Trend filter can span more than 2.5 hours
+* Fixed races in the filter graph executor that skipped filter runs or hung on exit
+* Fixed a crash on exit after acquiring with two independently triggered scopes
+* Fixed SDR sweeps putting signals in the wrong place in stitched spectra
+* Fixed sessions saved before a driver added a stream (such as RSSI) loading a complex channel's center frequency as an analog stream
+* Fixed Scalar Stairstep taking every missed step after a stall instead of resyncing
+* Fixed the filter graph being drawn at 1x on HiDPI displays, and autoscale ignoring the FFT detector setting
+* Fixed 100% CPU use while minimized in Performance mode
+* Fixed the `-L` line buffered log file option on Windows
+* Build: changing `Unit.h` or `ngscopeclient.h` rebuilds fewer files
 
 ## TODO
 
