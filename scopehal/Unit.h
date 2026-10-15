@@ -136,20 +136,6 @@ public:
 	UnitType GetType()
 	{ return m_type; }
 
-	static bool StepNumericText(
-		const std::string& text,
-		int cursor,
-		bool increment,
-		std::string& newText,
-		int& newCursor);
-
-	bool ReformatLikeText(
-		double value,
-		const std::string& text,
-		int cursor,
-		std::string& newText,
-		int& newCursor);
-
 	bool operator==(const Unit& rhs)
 	{ return m_type == rhs.m_type; }
 
@@ -169,31 +155,8 @@ public:
 protected:
 	UnitType m_type;
 
-	///@brief How values are shown: the scale factor, and the text around the number
-	struct Scaling
-	{
-		///@brief Factor to multiply values by to get the number shown
-		double factor;
-
-		///@brief SI prefix, like "k"
-		std::string prefix;
-
-		///@brief Text before the number, like "0x"
-		std::string numprefix;
-
-		///@brief The unit, like "Hz"
-		std::string suffix;
-
-		///@brief True if there is a space between the number and the prefix
-		bool space;
-	};
-
-	Scaling GetScaling(double reference) const;
-	std::string PrettyPrintScaled(
-		double value, bool useDisplayLocale, int sigfigs, int leftdigits = -1, int rightdigits = -1) const;
-	void GetBaseScale(int64_t& mul, int64_t& div) const;
-	bool GetPrefixScale(const std::string& str, size_t i, int64_t& mul, int64_t& div) const;
-	bool IsUnitSuffix(const std::string& str, size_t start) const;
+	//Formatting and parsing helpers are in UnitImpl, a subclass declared in Unit.cpp, so they can change without
+	//rebuilding everything that includes this file
 
 #ifdef _WIN32
 	/**

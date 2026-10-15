@@ -241,6 +241,59 @@ bool Oscilloscope::IsAppendingToWaveform()
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Waveform pool
+
+/**
+	@brief Gets an analog waveform for a new capture, reusing one from the pool if there is one
+
+	@param name	Name of the waveform
+ */
+UniformAnalogWaveform* Oscilloscope::AllocateAnalogWaveform(const string& name)
+{
+	auto p = m_analogWaveformPool.Get();
+	auto ret = dynamic_cast<UniformAnalogWaveform*>(p);
+	if(ret)
+	{
+		//Flags (like clipping) were for the last capture this was used for, not the next one
+		ret->Rename(name);
+		ret->m_flags = 0;
+		return ret;
+	}
+
+	//Delete garbage if somebody pushed the wrong type of waveform
+	if(p)
+		delete p;
+
+	//Pool was empty, allocate a new waveform
+	return new UniformAnalogWaveform(name);
+}
+
+/**
+	@brief Gets a digital waveform for a new capture, reusing one from the pool if there is one
+
+	@param name	Name of the waveform
+ */
+SparseDigitalWaveform* Oscilloscope::AllocateDigitalWaveform(const string& name)
+{
+	auto p = m_digitalWaveformPool.Get();
+	auto ret = dynamic_cast<SparseDigitalWaveform*>(p);
+	if(ret)
+	{
+		//Flags (like clipping) were for the last capture this was used for, not the next one
+		ret->Rename(name);
+		ret->m_flags = 0;
+		return ret;
+	}
+
+	//Delete garbage if somebody pushed the wrong type of waveform
+	if(p)
+		delete p;
+
+	//Pool was empty, allocate a new waveform
+	return new SparseDigitalWaveform(name);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Averaging
 
 bool Oscilloscope::CanAverage(size_t /*i*/)

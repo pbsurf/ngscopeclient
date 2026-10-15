@@ -35,6 +35,7 @@
  */
 
 #include "scopehal.h"
+#include "NumericText.h"
 
 #include <cinttypes>
 #include <numeric>
@@ -48,6 +49,51 @@ locale_t Unit::m_locale;
 locale_t Unit::m_defaultLocale;
 #endif
 char Unit::m_decimalSeparator = '.';
+
+/**
+	@brief Implementation details of Unit
+
+	These are kept out of Unit.h, which almost everything includes, so that changing them only rebuilds this file.
+	A UnitImpl is a copy of the Unit it's made from, which is just its type.
+ */
+class UnitImpl : public Unit
+{
+public:
+	explicit UnitImpl(const Unit& unit)
+		: Unit(unit)
+	{}
+
+	///@brief The decimal separator of the user's locale
+	static char GetDecimalSeparator()
+	{ return m_decimalSeparator; }
+
+	///@brief How values are shown: the scale factor, and the text around the number
+	struct Scaling
+	{
+		///@brief Factor to multiply values by to get the number shown
+		double factor;
+
+		///@brief SI prefix, like "k"
+		string prefix;
+
+		///@brief Text before the number, like "0x"
+		string numprefix;
+
+		///@brief The unit, like "Hz"
+		string suffix;
+
+		///@brief True if there is a space between the number and the prefix
+		bool space;
+	};
+
+	Scaling GetScaling(double reference) const;
+	string PrettyPrintScaled(
+		double value, bool useDisplayLocale, int sigfigs, int leftdigits = -1, int rightdigits = -1) const;
+	void GetBaseScale(int64_t& mul, int64_t& div) const;
+	bool GetPrefixScale(const string& str, size_t i, int64_t& mul, int64_t& div) const;
+	bool IsUnitSuffix(const string& str, size_t start) const;
+	bool ReformatLikeText(double value, const string& text, int cursor, string& newText, int& newCursor);
+};
 
 /**
 	@brief Constructs a new unit from a string
@@ -322,7 +368,7 @@ static void ChooseSIPrefix(double num, int base, int lowest, int highest, double
 
 	@param reference	The value to choose the prefix for
  */
-Unit::Scaling Unit::GetScaling(double reference) const
+UnitImpl::Scaling UnitImpl::GetScaling(double reference) const
 {
 	Scaling s;
 	s.factor = 1;
@@ -459,7 +505,7 @@ Unit::Scaling Unit::GetScaling(double reference) const
  */
 string Unit::PrettyPrint(double value, int sigfigs, bool useDisplayLocale) const
 {
-	return PrettyPrintScaled(value, useDisplayLocale, sigfigs);
+	return UnitImpl(*this).PrettyPrintScaled(value, useDisplayLocale, sigfigs);
 }
 
 /**
@@ -471,7 +517,7 @@ string Unit::PrettyPrint(double value, int sigfigs, bool useDisplayLocale) const
  */
 string Unit::PrettyPrintTabular(double value, int leftdigits, int rightdigits) const
 {
-	return PrettyPrintScaled(value, true, -1, leftdigits, rightdigits);
+	return UnitImpl(*this).PrettyPrintScaled(value, true, -1, leftdigits, rightdigits);
 }
 
 /**
@@ -485,7 +531,7 @@ string Unit::PrettyPrintTabular(double value, int leftdigits, int rightdigits) c
 	@param leftdigits			If not negative, minimum width of the number, as for printf()
 	@param rightdigits			Number of digits after the decimal point, if leftdigits is not negative
  */
-string Unit::PrettyPrintScaled(double value, bool useDisplayLocale, int sigfigs, int leftdigits, int rightdigits) const
+string UnitImpl::PrettyPrintScaled(double value, bool useDisplayLocale, int sigfigs, int leftdigits, int rightdigits) const
 {
 	// Special handling for overload value
 	if(value >= std::numeric_limits<double>::max())
@@ -595,7 +641,7 @@ string Unit::PrettyPrintInt64WithScale(int64_t value, int64_t scaleReference, in
 	if(useDisplayLocale)
 		SetPrintingLocale();
 
-	auto s = GetScaling(scaleReference);
+	auto s = UnitImpl(*this).GetScaling(scaleReference);
 
 	//Apply the rescaling in the integer domain
 	int64_t mulFactor = s.factor;
@@ -712,7 +758,7 @@ string Unit::PrettyPrintInt64WithResolution(int64_t value, double resolution, bo
 		//resolution, so that neighboring positions are shown as different values
 		//(this must use the same scaling as PrettyPrintInt64(), including special cases for units like uHz that
 		//aren't SI base units, or the digits will be off by the difference)
-		double scaleFactor = GetScaling(value).factor;
+		double scaleFactor = UnitImpl(*this).GetScaling(value).factor;
 		double scaledResolution = resolution * scaleFactor;
 		digits = ceil(-log10(scaledResolution) - 1e-9);
 		digits = max(0, min(MAX_INT64_DECIMALS, digits));
@@ -751,7 +797,7 @@ string Unit::PrettyPrintRange(double pixelMin, double pixelMax, double rangeMin,
 	SetPrintingLocale();
 
 	//Figure out the scale factor to use. Use the full-scale range to select the factor even if we're small here
-	auto s = GetScaling(max(fabs(rangeMin), fabs(rangeMax)));
+	auto s = UnitImpl(*this).GetScaling(max(fabs(rangeMin), fabs(rangeMax)));
 
 	//Swap values if they're reversed
 	if(fabs(pixelMin) > fabs(pixelMax))
@@ -969,7 +1015,7 @@ static int CursorExponent(const NumberInText& num, int cursor)
 
 	@return				True if a number was found and stepped. If false, newText and newCursor are not modified.
  */
-bool Unit::StepNumericText(const string& text, int cursor, bool increment, string& newText, int& newCursor)
+bool StepNumericText(const string& text, int cursor, bool increment, string& newText, int& newCursor)
 {
 	size_t n = text.size();
 
@@ -993,7 +1039,7 @@ bool Unit::StepNumericText(const string& text, int cursor, bool increment, strin
 
 		//Use the same decimal mark if we already have one, otherwise the one for the user's locale
 		if(mark == string::npos)
-			widened += m_decimalSeparator;
+			widened += UnitImpl::GetDecimalSeparator();
 		widened += '0';
 		int widenedCursor = static_cast<int>(widened.size());
 		widened += text.substr(numEnd);
@@ -1115,6 +1161,7 @@ bool Unit::StepNumericText(const string& text, int cursor, bool increment, strin
 
 	At least as many decimal places as the text had are shown, more if the value needs them.
 
+	@param unit			Unit of the value
 	@param value		Value to format
 	@param text			Text being edited, in the form described in StepNumericText()
 	@param cursor		Cursor position, as a byte offset into text
@@ -1124,7 +1171,14 @@ bool Unit::StepNumericText(const string& text, int cursor, bool increment, strin
 	@return				True if text has a number and value could be formatted like it. If false, newText and
 						newCursor are not modified.
  */
-bool Unit::ReformatLikeText(double value, const string& text, int cursor, string& newText, int& newCursor)
+bool ReformatLikeText(
+	const Unit& unit, double value, const string& text, int cursor, string& newText, int& newCursor)
+{
+	return UnitImpl(unit).ReformatLikeText(value, text, cursor, newText, newCursor);
+}
+
+///@brief Implementation of ReformatLikeText(), which needs the internals of Unit
+bool UnitImpl::ReformatLikeText(double value, const string& text, int cursor, string& newText, int& newCursor)
 {
 	auto num = FindNumber(text);
 	if(num.intDigits + num.fracDigits == 0)
@@ -1211,7 +1265,7 @@ bool Unit::ReformatLikeText(double value, const string& text, int cursor, string
 
 	@return			True if everything from start on, ignoring trailing whitespace, is the unit's suffix
  */
-bool Unit::IsUnitSuffix(const string& str, size_t start) const
+bool UnitImpl::IsUnitSuffix(const string& str, size_t start) const
 {
 	string suffix = GetScaling(1).suffix;
 	if(suffix.empty())
@@ -1228,7 +1282,7 @@ bool Unit::IsUnitSuffix(const string& str, size_t start) const
 
 	As a fraction mul / div, so integer parsing can apply it exactly.
  */
-void Unit::GetBaseScale(int64_t& mul, int64_t& div) const
+void UnitImpl::GetBaseScale(int64_t& mul, int64_t& div) const
 {
 	mul = 1;
 	div = 1;
@@ -1269,7 +1323,7 @@ void Unit::GetBaseScale(int64_t& mul, int64_t& div) const
 
 	@return			True if there is a prefix at i (rather than just the unit, or nothing that's known)
  */
-bool Unit::GetPrefixScale(const string& str, size_t i, int64_t& mul, int64_t& div) const
+bool UnitImpl::GetPrefixScale(const string& str, size_t i, int64_t& mul, int64_t& div) const
 {
 	mul = 1;
 	div = 1;
@@ -1341,7 +1395,7 @@ double Unit::ParseString(const string& str, bool useDisplayLocale)
 
 			int64_t mul;
 			int64_t div;
-			if(GetPrefixScale(str, i, mul, div))
+			if(UnitImpl(*this).GetPrefixScale(str, i, mul, div))
 				scale = static_cast<double>(mul) / div;
 			break;
 		}
@@ -1352,7 +1406,7 @@ double Unit::ParseString(const string& str, bool useDisplayLocale)
 		//Apply a unit-specific scaling factor
 		int64_t mul;
 		int64_t div;
-		GetBaseScale(mul, div);
+		UnitImpl(*this).GetBaseScale(mul, div);
 		ret = ret * mul / div;
 
 		ret *= scale;
@@ -1407,7 +1461,7 @@ int64_t Unit::ParseStringInt64(const string& str, bool useDisplayLocale)
 		//Apply unit-specific scaling factor first
 		int64_t mulscale;
 		int64_t divscale;
-		GetBaseScale(mulscale, divscale);
+		UnitImpl(*this).GetBaseScale(mulscale, divscale);
 
 		//Remove decimal separators  and find suffixes
 		string sbase;
@@ -1438,7 +1492,7 @@ int64_t Unit::ParseStringInt64(const string& str, bool useDisplayLocale)
 
 			int64_t mul;
 			int64_t div;
-			if(GetPrefixScale(str, i, mul, div))
+			if(UnitImpl(*this).GetPrefixScale(str, i, mul, div))
 				MulFraction(mulscale, divscale, mul, div);
 			break;
 		}
