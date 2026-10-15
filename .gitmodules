@@ -16,3 +16,6 @@
 [submodule "lib/canvas_ity"]
 	path = lib/canvas_ity
 	url = https://github.com/a-e-k/canvas_ity.git
+[submodule "doc/upstream"]
+	path = doc/upstream
+	url = https://github.com/ngscopeclient/scopehal-docs
