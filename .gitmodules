@@ -25,6 +25,3 @@
 [submodule "lib/canvas_ity"]
 	path = lib/canvas_ity
 	url = https://github.com/a-e-k/canvas_ity.git
-[submodule "lib/log"]
-	path = lib/log
-	url = https://github.com/pbsurf/ngscopeclient-logtools.git
