@@ -5068,7 +5068,7 @@ void WaveformArea::DrawDropRangeMismatchMessage(
 }
 
 ///@brief How long (in seconds) the clip indicator stays on after the clipping goes away
-static const double g_clipHoldTime = 2;
+static const double g_clipHoldTime = 1;
 
 /**
 	@brief Finds streams flagged as clipping, in a stream or anything upstream of it
@@ -5378,7 +5378,7 @@ void WaveformArea::ChannelButton(shared_ptr<DisplayedChannel> chan, size_t index
 		if(ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
 		{
 			string tooltip = clipping.empty() ?
-				"Clipping was detected in the last few seconds in: " :
+				"Clipping was detected in the last second in: " :
 				"Clipping detected in: ";
 			tooltip += chan->m_clipSources + "\n\n"
 				"Samples went past the end of the range (such as the full scale of an ADC), so this waveform may be "
