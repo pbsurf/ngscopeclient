@@ -406,6 +406,12 @@ public:
 
 	std::string m_colorRamp;
 
+	///@brief Time clipping was last seen in this waveform or anything upstream of it, or 0 if never
+	double m_lastClipTime;
+
+	///@brief Names of the streams that were clipping as of m_lastClipTime
+	std::string m_clipSources;
+
 protected:
 
 	///@brief Parent session object

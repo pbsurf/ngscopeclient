@@ -61,6 +61,7 @@ using namespace std;
 DisplayedChannel::DisplayedChannel(StreamDescriptor stream, Session& session)
 		: MeasurementDescriptor("", stream)
 		, m_colorRamp("eye-gradient-viridis")
+		, m_lastClipTime(0)
 		, m_session(session)
 		, m_rasterizedWaveform("DisplayedChannel.m_rasterizedWaveform")
 		, m_indexBuffer("DisplayedChannel.m_indexBuffer")
@@ -5066,6 +5067,35 @@ void WaveformArea::DrawDropRangeMismatchMessage(
 	}
 }
 
+///@brief How long (in seconds) the clip indicator stays on after the clipping goes away
+static const double g_clipHoldTime = 2;
+
+/**
+	@brief Finds streams flagged as clipping, in a stream or anything upstream of it
+
+	A filter's output is only as good as its inputs, so clipping in (say) the I/Q samples going into an FFT means the
+	spectrum is suspect too.
+
+	@param stream	Stream to look at
+	@param visited	Nodes whose inputs have already been looked at
+	@param names	Names of the clipping streams found are added to this
+ */
+static void FindClippingStreams(StreamDescriptor stream, set<FlowGraphNode*>& visited, set<string>& names)
+{
+	auto node = stream.m_channel;
+	if(!node)
+		return;
+
+	auto data = stream.GetData();
+	if(data && (data->m_flags & WaveformBase::WAVEFORM_CLIPPING))
+		names.emplace(stream.GetName());
+
+	if(!visited.insert(node).second)
+		return;
+	for(size_t i=0; i<node->GetInputCount(); i++)
+		FindClippingStreams(node->GetInput(i), visited, names);
+}
+
 /**
 	@brief Handles a button for a channel
  */
@@ -5318,6 +5348,49 @@ void WaveformArea::ChannelButton(shared_ptr<DisplayedChannel> chan, size_t index
 		FilterMenu(chan);
 
 		ImGui::EndPopup();
+	}
+
+	//Clip indicator next to the button. It's held for a while after the clipping goes away, so that it doesn't
+	//flicker when only some captures clip (or only some steps of a sweep) and isn't missed if it was brief.
+	set<FlowGraphNode*> visited;
+	set<string> clipping;
+	FindClippingStreams(stream, visited, clipping);
+	double now = GetTime();
+	if(!clipping.empty())
+	{
+		chan->m_lastClipTime = now;
+		chan->m_clipSources.clear();
+		for(auto& name : clipping)
+			chan->m_clipSources += string(chan->m_clipSources.empty() ? "" : ", ") + name;
+	}
+	if( (chan->m_lastClipTime > 0) && ( (now - chan->m_lastClipTime) < g_clipHoldTime) )
+	{
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
+		ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200, 30, 30, 255));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220, 50, 50, 255));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(220, 50, 50, 255));
+			ImGui::Button(("CLIP###clip" + to_string(index)).c_str());
+		ImGui::PopStyleColor(4);
+
+		if(ImGui::IsItemHovered())
+			m_mouseOverButton = true;
+		if(ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+		{
+			string tooltip = clipping.empty() ?
+				"Clipping was detected in the last few seconds in: " :
+				"Clipping detected in: ";
+			tooltip += chan->m_clipSources + "\n\n"
+				"Samples went past the end of the range (such as the full scale of an ADC), so this waveform may be "
+				"distorted. For an instrument input, try less gain or more attenuation.";
+
+			MainWindow::SetTooltipPosition();
+			ImGui::BeginTooltip();
+			ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35);
+			ImGui::TextUnformatted(tooltip.c_str());
+			ImGui::PopTextWrapPos();
+			ImGui::EndTooltip();
+		}
 	}
 }
 

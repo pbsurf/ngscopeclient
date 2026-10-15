@@ -654,6 +654,71 @@ TEST_CASE("IIOSDR_TwoChannels")
 	REQUIRE(rx2 < 0.8 * g_tone2400);
 }
 
+/**
+	@brief Checks if both the I and Q waveforms of a receive channel are flagged as clipping (and that they agree)
+ */
+static bool IsClipping(InstrumentChannel* chan)
+{
+	auto i = chan->GetData(0);
+	auto q = chan->GetData(1);
+	REQUIRE(i != nullptr);
+	REQUIRE(q != nullptr);
+	bool iclip = (i->m_flags & WaveformBase::WAVEFORM_CLIPPING) != 0;
+	bool qclip = (q->m_flags & WaveformBase::WAVEFORM_CLIPPING) != 0;
+	REQUIRE(iclip == qclip);
+	return iclip;
+}
+
+TEST_CASE("IIOSDR_Clipping")
+{
+	IIOContext* ctx;
+	auto sdr = MakeSDR("mock:ad9361", ctx);
+	sdr->SetSampleDepth(4096);
+	sdr->EnableChannel(1);
+
+	//The AGC keeps the tones well inside full scale
+	sdr->StartSingleTrigger();
+	REQUIRE(sdr->AcquireData());
+	REQUIRE(sdr->PopPendingWaveform());
+	REQUIRE(!IsClipping(sdr->GetChannel(0)));
+	REQUIRE(!IsClipping(sdr->GetChannel(1)));
+
+	//Way too much gain on RX1 clips it, but not RX2 (two RX paths in the buffer)
+	sdr->SetGainMode(0, "manual");
+	sdr->SetGain(0, 70);
+	sdr->BackgroundProcessing();
+	sdr->StartSingleTrigger();
+	REQUIRE(sdr->AcquireData());
+	REQUIRE(sdr->PopPendingWaveform());
+	REQUIRE(IsClipping(sdr->GetChannel(0)));
+	REQUIRE(!IsClipping(sdr->GetChannel(1)));
+
+	//Same with only RX1 in the buffer
+	sdr->DisableChannel(1);
+	sdr->StartSingleTrigger();
+	REQUIRE(sdr->AcquireData());
+	REQUIRE(sdr->PopPendingWaveform());
+	REQUIRE(IsClipping(sdr->GetChannel(0)));
+
+	//And it goes away with the gain turned back down, even when the clipped waveforms are reused for the next
+	//capture (like they are when the history gives them back to the pool)
+	auto oldI = sdr->GetChannel(0)->Detach(0);
+	auto oldQ = sdr->GetChannel(0)->Detach(1);
+	sdr->AddWaveformToAnalogPool(oldI);
+	sdr->AddWaveformToAnalogPool(oldQ);
+
+	sdr->SetGain(0, 20);
+	sdr->BackgroundProcessing();
+	sdr->StartSingleTrigger();
+	REQUIRE(sdr->AcquireData());
+	REQUIRE(sdr->PopPendingWaveform());
+	auto newI = sdr->GetChannel(0)->GetData(0);
+	auto newQ = sdr->GetChannel(0)->GetData(1);
+	REQUIRE( ( (newI == oldI) || (newI == oldQ) ) );
+	REQUIRE( ( (newQ == oldI) || (newQ == oldQ) ) );
+	REQUIRE(!IsClipping(sdr->GetChannel(0)));
+}
+
 TEST_CASE("IIOSDR_RSSI")
 {
 	IIOContext* ctx;
