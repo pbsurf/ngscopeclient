@@ -372,12 +372,16 @@ int main(int argc, char* argv[])
 		//While no window is on screen (e.g. minimized), we don't draw frames at all, in either mode: the loop sleeps
 		//until an event and only does the background work, such as taking in new waveforms. The waveform thread and
 		//HTTP export trigger requests wake it up, so the timeout is only a safety net.
+		//The background work runs at most once per display refresh, since that's how often a visible window takes in
+		//waveforms; otherwise minimizing would make acquisition and filters run faster than when on screen.
 		const int settleFrameCount = 3;
 		const Uint32 activeWindowMs = 1000;
 		const int activePollMs = 33;
 		const int hiddenPollMs = 250;
 		int settleFramesLeft = 0;
 		Uint32 lastEventTicks = 0;
+		double hiddenWorkInterval = 1.0 / 60;
+		double lastHiddenWorkTime = 0;
 		bool pausedWhileMinimized = false;
 		auto pausedTriggerType = TriggerGroup::TRIGGER_TYPE_NORMAL;
 
@@ -397,7 +401,18 @@ int main(int argc, char* argv[])
 			if(hidden != g_waveformRenderingPaused)
 			{
 				g_waveformRenderingPaused = hidden;
-				if(!hidden)
+
+				//Look up the refresh rate each time, in case the window moved to another display
+				if(hidden)
+				{
+					SDL_DisplayMode mode;
+					int display = SDL_GetWindowDisplayIndex(g_mainWindow->GetWindow());
+					if( (display >= 0) && (SDL_GetCurrentDisplayMode(display, &mode) == 0) && (mode.refresh_rate > 0) )
+						hiddenWorkInterval = 1.0 / mode.refresh_rate;
+					else
+						hiddenWorkInterval = 1.0 / 60;
+				}
+				else
 					g_rerenderRequestedEvent.Signal();
 			}
 
@@ -416,7 +431,13 @@ int main(int argc, char* argv[])
 			}
 
 			if(hidden)
+			{
+				//If we did the background work less than a refresh interval ago, sleep until the next one is due
 				timeoutMs = hiddenPollMs;
+				double untilNext = lastHiddenWorkTime + hiddenWorkInterval - GetTime();
+				if(untilNext > 0)
+					timeoutMs = (int)ceil(untilNext * 1000);
+			}
 
 			//Check which event loop model to use
 			//(never sleep with an uncapped framerate, since that's only used for benchmarking)
@@ -465,7 +486,14 @@ int main(int argc, char* argv[])
 
 			//Draw the main window, or if nothing is on screen just do the work that doesn't need a frame
 			if(hidden)
-				g_mainWindow->DoBackgroundWork();
+			{
+				double now = GetTime();
+				if(now >= lastHiddenWorkTime + hiddenWorkInterval)
+				{
+					lastHiddenWorkTime = now;
+					g_mainWindow->DoBackgroundWork();
+				}
+			}
 			else
 				g_mainWindow->Render();
 		}
