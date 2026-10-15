@@ -1,0 +1,117 @@
+\chapter{SDR Drivers}
+\label{sec:sdr-drivers}
+
+This chapter describes all of the available drivers for software-defined radios.
+
+\section{Ettus Research}
+
+\begin{tabularx}{16cm}{lllX}
+\thickhline
+\textbf{Device Family} & \textbf{Driver} & \textbf{Transport} & \textbf{Notes} \\
+\thickhline
+USRP & uhd & twinlan & \\
+\thickhline
+\end{tabularx}
+
+\subsection{uhd}
+
+This driver connects via a TCP socket to a socket server
+\href{https://github.com/ngscopeclient/scopehal-uhd-bridge}{scopehal-uhd-bridge} which connects to the appropriate
+instrument using the UHD API.
+
+This provides network transparency for USB-attached instruments, as well as a license boundary between the BSD-licensed
+libscopehal core and the GPL-licensed UHD API.
+
+\section{Analog Devices}
+
+\begin{tabularx}{16cm}{lllX}
+\thickhline
+\textbf{Device Family} & \textbf{Driver} & \textbf{Transport} & \textbf{Notes} \\
+\thickhline
+ADALM-PLUTO, other AD9361/AD9363/AD9364 SDRs & iio & iio & Receive, and transmit of tones from the DDS \\
+\thickhline
+\end{tabularx}
+
+\subsection{iio}
+
+This driver talks to radios based on the AD9361 family (including the AD9363 in the ADALM-PLUTO) using
+\href{https://github.com/analogdevicesinc/libiio}{libiio} directly, without a bridge process. It is only available
+if ngscopeclient was built with libiio 0.x (0.26 has been tested); newer 1.x releases are not supported yet.
+
+The transport path is a libiio context URI such as \texttt{ip:192.168.2.1} (the default address of a PlutoSDR
+connected by USB), \texttt{usb:1.5.5}, or \texttt{local:}. A bare hostname or IP address is treated as an \texttt{ip:}
+URI. USB-attached radios are listed in the Endpoint drop-down of the Add Instrument dialog. Radios with two receive
+paths show up as two complex channels.
+
+The center frequency sets the receive local oscillator and the span sets the analog RF bandwidth. The sample rate is
+configured separately, and should be at least as wide as the span. The limits for each of these come from the radio
+(the AD9363 in a stock PlutoSDR cannot tune below 325 MHz, for example, while an AD9361 or a PlutoSDR with unlocked
+firmware can), so values you enter are limited to what the radio supports.
+
+Radios with the usual DDS core in the FPGA (the stock firmware of the PlutoSDR and similar radios) can also transmit.
+Each transmit path shows up in the stream browser as a channel (TX1, and TX2 on radios with two transmit paths) after
+the receive channels, and can generate two tones. Each tone has an on/off switch, a frequency and an amplitude. The
+frequency is relative to the transmit local oscillator (LO), so negative frequencies are below the LO, and can be up to
+half of the sample rate either side of it. The amplitude is a percentage of the full scale of the DAC, so keep the sum
+of the amplitudes of both tones at or below 100\% to avoid clipping. The transmit LO frequency, which is shared by all
+transmit paths and is independent of the receive LO, is the TX LO setting in the frequency section of the instrument.
+These settings are saved in sessions. The transmitter is not turned off when ngscopeclient disconnects.
+The tone amplitudes are not the output power, which also depends on the attenuation of the transmit path. This is the
+Attenuation setting of the transmit channel, in dB (0 dB is the most output power), and applies to both tones.
+
+The receiver gain is in the Input section of the channel properties. The gain mode selects between manual gain and
+the radio's automatic gain control (AGC) modes. The gain can only be set by hand in manual mode. A radio that has just
+powered up is normally running AGC, and ngscopeclient leaves that alone until you change it. The gain mode and gain
+are saved in sessions along with the other settings.
+
+The receive gain is taken out of the I/Q samples, so the signal level (in the time domain, and on an FFT of it) stays
+the same when the gain changes, including while AGC is moving it. Without calibration the level is only approximate,
+since the gain of the radio varies with frequency and from one radio to another. Two more settings in the Input
+section make it accurate:
+\begin{itemize}
+\item \textbf{External gain} is the gain of anything in front of the input, such as an amplifier or a cable, in dB.
+Use a negative value for loss, for example -20~dB for a 20~dB attenuator. The level is then the one at the input of
+that, rather than at the input of the radio. The vertical range and offset are scaled to match when you change it.
+\item \textbf{Calibration file} is a table of the gain of the radio against frequency. The gain at each frequency is
+how many dB higher than it should the level reads with no calibration, no external gain, and 0~dB receive gain; it is
+interpolated linearly between points, and taken as that of the nearest point outside them. Either a text file with a
+frequency and a gain on each line, separated by a comma, semicolon, tab or spaces (the frequency in Hz, or with a
+unit such as \texttt{2.4 GHz}; lines starting with \texttt{\#} are comments, and a header line is allowed), a
+Touchstone file with two or more ports, in which case S21 is the gain, or a JSON file (\texttt{.json}). The JSON can
+also be pasted straight into the box instead of a path. It is an array of points, each either
+\texttt{[frequency, gain]} or \texttt{\{"freq": frequency, "gain": gain\}} (\texttt{"frequency"} works too), or
+an object with that array under \texttt{"points"}, so other information can go alongside it. Frequencies and gains
+are numbers, or strings which can have a unit like in a text file, for example
+\texttt{[[100e6, 3.5], ["2.4 GHz", 1.2]]}. The gain is looked up at the receive LO frequency, so it corrects the
+level across the whole tuning range (and each step of a sweep) but not the response within one capture.
+\end{itemize}
+The total gain taken out at the current center frequency is shown below these. The external gain and calibration file
+are saved in sessions; the calibration file is reloaded from disk when a session is opened (pasted JSON is saved
+in the session itself).
+
+Some things to be aware of:
+\begin{itemize}
+\item Transmit is limited to tones from the DDS. Arbitrary waveforms cannot be transmitted.
+\item Data is captured in blocks of the selected memory depth, so consecutive acquisitions are not gap free.
+\item The link to the radio limits the usable sample rate. Over USB 2.0 the higher rates will not keep up.
+\end{itemize}
+
+For development and testing without hardware, use the transport path \texttt{mock:} (a simulated single-channel
+AD9363) or \texttt{mock:ad9361} (two channels). The simulated radio receives a few fixed RF tones in the 433~MHz,
+915~MHz and 2.4~GHz bands, from -60 to -40~dBm, which move around as you retune it. The simulated AGC settles at
+20~dB of receive gain. In manual gain mode the signal in the samples gets stronger and weaker as you change the gain,
+so it stays the same once the gain is taken out (until the ADC clips, from about 55~dB of gain for the strongest
+tone).
+
+Each transmit path of the simulated radio is connected to the receive path with the same number, as if with a cable
+and a 30~dB attenuator, so the transmitted tones show up in the received signal at the transmit LO plus their
+frequency. A full scale tone with no transmit attenuation is +7~dBm, so the default tone (25\% amplitude, 10~dB
+attenuation) arrives at about -45~dBm. The received signal also has realistic noise: the thermal noise at the input
+(with a 3~dB noise figure) amplified by the receive gain, plus the noise of the ADC. Above about 50~dB of gain (at
+2.5~MS/s, less at higher sample rates) the thermal noise dominates, so the noise floor stays put as the gain
+changes; below that the ADC noise takes over, and the noise floor rises as the gain goes down.
+
+\section{Microphase}
+
+The AntSDR running antsdr\_uhd firmware is supported by the ``uhd" driver for Ettus Research SDRs. There is currently no
+support for the IIO firmware.

@@ -1,6 +1,3 @@
-[submodule "doc"]
-	path = doc
-	url = ../scopehal-docs.git
 [submodule "src/ImGuiFileDialog"]
 	path = src/ImGuiFileDialog
 	url = https://github.com/aiekick/ImGuiFileDialog
