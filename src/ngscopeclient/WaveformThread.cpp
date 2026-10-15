@@ -52,6 +52,9 @@ Event g_waveformProcessedEvent;
 ///@brief Time spent on the last cycle of waveform rendering shaders
 atomic<int64_t> g_lastWaveformRenderTime;
 
+///@brief True while no window is on screen, so rasterizing and tone mapping would be wasted work
+atomic<bool> g_waveformRenderingPaused(false);
+
 void RenderAllWaveforms(vk::raii::CommandBuffer& cmdbuf, Session* session, shared_ptr<QueueHandle> queue);
 
 void WaveformThread(Session* session, atomic<bool>* shuttingDown)
@@ -165,6 +168,10 @@ void RenderAllWaveforms(vk::raii::CommandBuffer& cmdbuf, Session* session, share
 	#ifdef HAVE_NVTX
 		nvtx3::scoped_range range("RenderAllWaveforms");
 	#endif
+
+	//Nothing is on screen to show the result
+	if(g_waveformRenderingPaused)
+		return;
 
 	double tstart = GetTime();
 

@@ -54,6 +54,7 @@ class OscilloscopeState;
 #include "TriggerGroup.h"
 
 extern std::atomic<int64_t> g_lastWaveformRenderTime;
+extern std::atomic<bool> g_waveformRenderingPaused;
 
 class Session;
 

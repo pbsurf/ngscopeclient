@@ -51,6 +51,8 @@ GuiLogSink* g_guiLog;
 void Relaunch(int argc, char* argv[]);
 #endif
 
+extern Event g_rerenderRequestedEvent;
+
 /**
 	@brief Check if an event should close the application
 
@@ -389,6 +391,15 @@ int main(int argc, char* argv[])
 			//How long to wait for an event before going on (negative = don't wait)
 			int timeoutMs = -1;
 			bool hidden = g_mainWindow->IsHidden();
+
+			//Don't rasterize or tone map waveforms nobody can see. When a window is back on screen, re-render
+			//everything once so the plots show the latest data
+			if(hidden != g_waveformRenderingPaused)
+			{
+				g_waveformRenderingPaused = hidden;
+				if(!hidden)
+					g_rerenderRequestedEvent.Signal();
+			}
 
 			//Pause a running acquisition while minimized if the user asked for that, and restart it on restore
 			if(hidden && session.IsTriggerRunning() &&

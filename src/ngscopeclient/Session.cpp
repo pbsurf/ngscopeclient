@@ -3546,6 +3546,7 @@ bool Session::CheckForWaveforms(vk::raii::CommandBuffer& cmdbuf)
 		//but density functions like spectrogram are an exception as those don't have a render step.
 		//TODO: should we "snapshot" the waveform into a render buffer or something to avoid this sync point?
 		hadNewWaveforms = true;
+		if(!g_waveformRenderingPaused)
 		{
 			lock_guard<shared_mutex> lock(m_waveformDataMutex);
 			m_mainWindow->ToneMapAllWaveforms(cmdbuf);
@@ -3561,7 +3562,7 @@ bool Session::CheckForWaveforms(vk::raii::CommandBuffer& cmdbuf)
 	}
 
 	//If a re-render operation completed, tone map everything again
-	if((g_rerenderDoneEvent.Peek() || g_refilterDoneEvent.Peek()) && !hadNewWaveforms)
+	if((g_rerenderDoneEvent.Peek() || g_refilterDoneEvent.Peek()) && !hadNewWaveforms && !g_waveformRenderingPaused)
 		m_mainWindow->ToneMapAllWaveforms(cmdbuf);
 
 	return hadNewWaveforms;
