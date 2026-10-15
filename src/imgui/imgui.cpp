@@ -18289,7 +18289,7 @@ static void ImGui::DockContextBuildNodesFromSettings(ImGuiContext* ctx, ImGuiDoc
             node->ParentNode->ChildNodes[0] = node;
         else if (node->ParentNode && node->ParentNode->ChildNodes[1] == NULL)
             node->ParentNode->ChildNodes[1] = node;
-        node->SelectedTabId = settings->SelectedTabId;
+        node->SelectedTabId = node->SettingsSelectedTabId = settings->SelectedTabId;
         node->SplitAxis = (ImGuiAxis)settings->SplitAxis;
         node->SetLocalFlags(settings->Flags & ImGuiDockNodeFlags_SavedFlagsMask_);
 
@@ -18655,6 +18655,7 @@ ImGuiDockNode::ImGuiDockNode(ImGuiID id)
     LastFrameAlive = LastFrameActive = LastFrameFocused = -1;
     LastFocusedNodeId = 0;
     SelectedTabId = 0;
+    SettingsSelectedTabId = 0;
     WantCloseTabId = 0;
     RefViewportId = 0;
     AuthorityForPos = AuthorityForSize = ImGuiDataAuthority_DockNode;
@@ -19642,8 +19643,15 @@ static void ImGui::DockNodeUpdateTabBar(ImGuiDockNode* node, ImGuiWindow* host_w
     if (g.NavWindow && g.NavWindow->RootWindow->DockNode == node)
         tab_bar->SelectedTabId = g.NavWindow->RootWindow->TabId;
 
-    // Selected newly added tabs, or persistent tab ID if the tab bar was just recreated
-    if (tab_bar_is_recreated && TabBarFindTabByID(tab_bar, node->SelectedTabId) != NULL)
+    // Selected newly added tabs, or persistent tab ID if the tab bar was just recreated.
+    // The tab selected in .ini settings is selected when it appears, even if the tab bar already existed: windows
+    // which were already docked here before the settings were loaded can create the tab bar before it appears.
+    if (node->SettingsSelectedTabId != 0 && TabBarFindTabByID(tab_bar, node->SettingsSelectedTabId) != NULL)
+    {
+        tab_bar->SelectedTabId = tab_bar->NextSelectedTabId = node->SettingsSelectedTabId;
+        node->SettingsSelectedTabId = 0;
+    }
+    else if (tab_bar_is_recreated && TabBarFindTabByID(tab_bar, node->SelectedTabId) != NULL)
         tab_bar->SelectedTabId = tab_bar->NextSelectedTabId = node->SelectedTabId;
     else if (tab_bar->Tabs.Size > tabs_count_old)
         tab_bar->SelectedTabId = tab_bar->NextSelectedTabId = tab_bar->Tabs.back().Window->TabId;
