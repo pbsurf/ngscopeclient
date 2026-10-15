@@ -72,6 +72,14 @@ enum DataWidth
 	WIDTH_16_BITS
 };
 
+enum OpenRecentAtStartup
+{
+	OPEN_RECENT_OFF,
+	OPEN_RECENT_ASK,
+	OPEN_RECENT_RECONNECT,
+	OPEN_RECENT_OFFLINE
+};
+
 enum HeadlessStartupMode
 {
 	HEADLESS_STARTUP_ALL_NON_MSO,

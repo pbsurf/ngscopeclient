@@ -328,6 +328,22 @@ int main(int argc, char* argv[])
 			g_mainWindow->SetStartupSession(sessionToOpen, mode);
 		}
 
+		//Otherwise open the most recent file if the user asked for that
+		else if(instrumentConnectionStrings.empty())
+		{
+			auto openRecent = session.GetPreferences().GetEnumRaw("Files.open_recent_at_startup");
+			auto path = g_mainWindow->GetMostRecentFile();
+			if( (openRecent != OPEN_RECENT_OFF) && !path.empty() )
+			{
+				auto mode = MainWindow::STARTUP_SESSION_PROMPT;
+				if(openRecent == OPEN_RECENT_RECONNECT)
+					mode = MainWindow::STARTUP_SESSION_RECONNECT;
+				else if(openRecent == OPEN_RECENT_OFFLINE)
+					mode = MainWindow::STARTUP_SESSION_OFFLINE;
+				g_mainWindow->SetStartupSession(path, mode);
+			}
+		}
+
 		//Render the main window once, so it can initialize a new empty session before we connect any instruments
 		SDL_Event startupEvent;
 		while(SDL_PollEvent(&startupEvent))

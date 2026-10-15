@@ -310,6 +310,8 @@ public:
 		STARTUP_SESSION_OFFLINE		//Load for offline analysis without asking
 	};
 
+	std::string GetMostRecentFile();
+
 	void SetStartupSession(const std::string& path, StartupSessionMode mode = STARTUP_SESSION_PROMPT)
 	{
 		m_startupSession = path;

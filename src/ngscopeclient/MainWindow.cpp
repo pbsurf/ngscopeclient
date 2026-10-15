@@ -3947,6 +3947,24 @@ YAML::Node MainWindow::SerializeDialogs()
 	return node;
 }
 
+/**
+	@brief Returns the path of the most recently used session file, or an empty string if there is none
+ */
+string MainWindow::GetMostRecentFile()
+{
+	string path;
+	time_t newest = 0;
+	for(auto it : m_recentFiles)
+	{
+		if(path.empty() || (it.second > newest))
+		{
+			path = it.first;
+			newest = it.second;
+		}
+	}
+	return path;
+}
+
 void MainWindow::SaveRecentFileList()
 {
 	//Make a reverse mapping

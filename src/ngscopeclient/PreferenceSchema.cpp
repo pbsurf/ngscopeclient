@@ -772,6 +772,19 @@ void PreferenceManager::InitializeDefaults()
 				"Waveform data already saved in a .scopesession or session archive is left as it is, and waveforms "
 				"captured since it was opened or saved are not added. Sessions which have never been saved are not "
 				"saved on exit."));
+		files.AddPreference(
+			Preference::Enum("open_recent_at_startup", OPEN_RECENT_OFF)
+			.Label("Open most recent file at startup")
+			.Description(
+				"When ngscopeclient is started without a session file or instrument on the command line, open the "
+				"most recently used session file.\n\n"
+				"Ask: ask whether to reconnect to the instruments or load the saved data offline.\n"
+				"Reconnect: reconnect to the instruments without asking.\n"
+				"Offline: load the saved data for offline analysis without asking.")
+			.EnumValue("Off", OPEN_RECENT_OFF)
+			.EnumValue("Ask", OPEN_RECENT_ASK)
+			.EnumValue("Reconnect", OPEN_RECENT_RECONNECT)
+			.EnumValue("Offline", OPEN_RECENT_OFFLINE));
 
 	auto& help = this->m_treeRoot.AddCategory("Help");
 		auto& wizards = help.AddCategory("Wizards");
