@@ -1,0 +1,1680 @@
+/***********************************************************************************************************************
+*                                                                                                                      *
+* libscopehal                                                                                                          *
+*                                                                                                                      *
+* Copyright (c) 2012-2026 Andrew D. Zonenberg and contributors                                                         *
+* All rights reserved.                                                                                                 *
+*                                                                                                                      *
+* Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
+* following conditions are met:                                                                                        *
+*                                                                                                                      *
+*    * Redistributions of source code must retain the above copyright notice, this list of conditions, and the         *
+*      following disclaimer.                                                                                           *
+*                                                                                                                      *
+*    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the       *
+*      following disclaimer in the documentation and/or other materials provided with the distribution.                *
+*                                                                                                                      *
+*    * Neither the name of the author nor the names of any contributors may be used to endorse or promote products     *
+*      derived from this software without specific prior written permission.                                           *
+*                                                                                                                      *
+* THIS SOFTWARE IS PROVIDED BY THE AUTHORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED   *
+* TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL *
+* THE AUTHORS BE HELD LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES        *
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR       *
+* BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT *
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE       *
+* POSSIBILITY OF SUCH DAMAGE.                                                                                          *
+*                                                                                                                      *
+***********************************************************************************************************************/
+
+/**
+	@file
+	@author ngscopeclient contributors
+	@brief Implementation of IIOSDR
+	@ingroup sdrdrivers
+ */
+
+#ifdef HAS_IIO
+
+#include <sstream>
+
+#include "scopehal.h"
+#include "ComplexChannel.h"
+#include "IIOSDR.h"
+
+using namespace std;
+
+//Names of the IIO devices in the Linux ad9361 driver stack
+static const char* g_phyDevice = "ad9361-phy";
+static const char* g_rxDevice = "cf-ad9361-lpc";
+static const char* g_ddsDevice = "cf-ad9361-dds-core-lpc";
+
+//Maximum number of transmit paths (AD9361) and tones per path (each is a complex tone made from a pair of DDSs)
+static const size_t g_maxTx = 2;
+static const size_t g_maxTones = 2;
+
+//Full scale of the 12 bit ADC (sign extended into 16 bits by libiio)
+static const float g_adcScale = 1.0f / 2048;
+
+//Samples this far from zero (in ADC counts) are taken to be clipped, so either end of the -2048 to +2047 range counts
+static const int g_adcClipCounts = 2047;
+
+//When sweeping, how much of the capture bandwidth we step the LO by unless told otherwise. The rest is overlap between
+//adjacent captures, so that the analog filter rolloff at the edges of each capture isn't used.
+static const double g_defaultSweepStepFraction = 0.5;
+
+//Limits of the sweep step. Any bigger and there would be gaps between captures, any smaller and sweeps get very slow.
+static const double g_minSweepStepFraction = 0.1;
+static const double g_maxSweepStepFraction = 1.0;
+
+//How long to let the synthesizer settle after moving the LO during a sweep
+static const chrono::microseconds g_sweepSettleTime(1000);
+
+//Number of blocks the kernel can queue up while capturing. When not sweeping, more let the radio keep capturing while
+//we're busy (this is the libiio default). When sweeping, anything queued up before a retune would be at the old LO.
+//(Checked on a Pluto at 61.44 MSPS: with more than one while sweeping, captures come out a whole number of steps late.)
+static const size_t g_kernelBuffers = 4;
+static const size_t g_sweepKernelBuffers = 1;
+
+//How many blocks to throw away after a retune when sweeping. With one kernel buffer the radio only captures a block
+//once it's asked for, so nothing queued is from before the retune. (Checked on a Pluto by sweeping across a looped back
+//TX tone: no copies of it one LO step away. Checked again with a test tone at 4K - 256K samples per block and
+//61.44 MSPS. If they ever show up, set this to g_sweepKernelBuffers.)
+static const size_t g_sweepDiscard = 0;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Construction / destruction
+
+/**
+	@brief Constructs a new driver object
+
+	@param transport	SCPIIIOTransport connected to an IIO context
+ */
+IIOSDR::IIOSDR(SCPITransport* transport)
+	: SCPIDevice(transport)
+	, SCPIInstrument(transport)
+	, m_ctx(nullptr)
+	, m_numRx(0)
+	, m_centerFreq(2400000000)
+	, m_span(2000000)
+	, m_sampleRate(2500000)
+	, m_sampleDepth(65536)
+	, m_sweepEnabled(false)
+	, m_sweepStepFraction(g_defaultSweepStepFraction)
+	, m_centerFreqDirty(false)
+	, m_spanDirty(false)
+	, m_sampleRateDirty(false)
+	, m_numTx(0)
+	, m_numTones(0)
+	, m_txMinAtten(0)
+	, m_txMaxAtten(89.75)
+	, m_txLoFreq(2400000000)
+	, m_txLoDirty(false)
+	, m_txLoMin(70000000)
+	, m_txLoMax(6000000000)
+	, m_txMaxToneFreq(0)
+	, m_rssiStream(0)
+	, m_hwCenterFreq(m_centerFreq)
+	, m_hwSampleRate(m_sampleRate)
+	, m_sweepStep(0)
+	, m_sweepStartTime(0)
+	, m_sweepRestart(true)
+	, m_flushCapture(false)
+{
+	//Conservative limits until we've looked at the radio
+	m_limits = { 70000000, 6000000000, 200000, 56000000, 2083334, 61440000, -3, 71 };
+
+	auto iio = dynamic_cast<SCPIIIOTransport*>(transport);
+	if(iio)
+		m_ctx = iio->GetContext();
+	if(!m_ctx)
+	{
+		LogError("IIOSDR requires an IIO transport with a valid context\n");
+		return;
+	}
+
+	if(!m_ctx->HasDevice(g_phyDevice) || !m_ctx->HasDevice(g_rxDevice))
+	{
+		LogError("This IIO device does not look like an AD936x (no %s / %s), it is not supported\n",
+			g_phyDevice, g_rxDevice);
+		m_ctx = nullptr;
+		return;
+	}
+
+	//Figure out how many receive paths we have. AD9363/AD9364 have one, AD9361 has two.
+	while( (m_numRx < 2) && m_ctx->HasChannel(g_phyDevice, "voltage" + to_string(m_numRx), false) )
+		m_numRx ++;
+
+	for(size_t i=0; i<m_numRx; i++)
+	{
+		auto chan = new ComplexChannel(
+			this,
+			string("RX") + to_string(i+1),
+			GetChannelColor(i),
+			Unit(Unit::UNIT_FS),
+			Unit(Unit::UNIT_VOLTS),
+			m_channels.size());
+		m_channels.push_back(chan);
+		chan->SetDefaultDisplayName();
+		chan->SetStreamDisplayColor(1, GetQStreamColor(i));
+
+		//Range and offset are purely client side, the ADC is always full scale. The range is set once we know the gain.
+		SetChannelOffset(i, 0, 0);
+		SetChannelOffset(i, 1, 0);
+
+		//RSSI is only read on request, so there's nothing to show until then
+		m_rssiStream = chan->AddRSSIStream();
+		chan->SetScalarValue(m_rssiStream, NAN);
+		m_hasRSSI.push_back(m_ctx->HasChannelAttr(g_phyDevice, "voltage" + to_string(i), false, "rssi"));
+	}
+
+	//Only the first channel is enabled by default
+	m_channelEnabled.resize(m_numRx, false);
+	if(m_numRx > 0)
+		m_channelEnabled[0] = true;
+
+	m_gain.resize(m_numRx, 0);
+	m_hwGain.resize(m_numRx, 0);
+	m_gainMode.resize(m_numRx);
+	m_gainDirty.resize(m_numRx, false);
+	m_gainModeDirty.resize(m_numRx, false);
+	m_rssiEnabled.resize(m_numRx, false);
+
+	DetectLimits();
+	DetectTransmitter();
+
+	//Adopt whatever the radio is currently doing rather than stomping on it
+	ReadHardwareConfiguration();
+
+	//Default range is the full scale of the ADC, referred to the input
+	for(size_t i=0; i<m_numRx; i++)
+	{
+		float fullScale = 2 * pow(10, -GetInputGain(i, m_hwCenterFreq, m_hwGain[i]) / 20);
+		SetChannelVoltageRange(i, 0, fullScale);
+		SetChannelVoltageRange(i, 1, fullScale);
+	}
+	LogDebug("IIO SDR has %zu receive path(s), LO %" PRId64 " Hz, rate %" PRIu64 " Hz, bandwidth %" PRId64 " Hz\n",
+		m_numRx, m_centerFreq, m_sampleRate, m_span);
+	if(m_numTx > 0)
+		LogDebug("IIO SDR has %zu transmit path(s) with %zu tone(s) each, LO %" PRId64 " Hz\n",
+			m_numTx, m_numTones, m_txLoFreq);
+	LogDebug("Limits: LO %" PRId64 " - %" PRId64 " Hz, bandwidth %" PRId64 " - %" PRId64 " Hz, rate %" PRIu64 " - %" PRIu64
+		" Hz, gain %.0f - %.0f dB\n",
+		m_limits.minCenterFreq, m_limits.maxCenterFreq, m_limits.minBandwidth, m_limits.maxBandwidth,
+		m_limits.minSampleRate, m_limits.maxSampleRate, m_limits.minGain, m_limits.maxGain);
+}
+
+IIOSDR::~IIOSDR()
+{
+}
+
+/**
+	@brief Color the channels arbitrarily (yellow-cyan-magenta-green)
+
+	@param i	Channel number
+ */
+string IIOSDR::GetChannelColor(size_t i)
+{
+	switch(i % 4)
+	{
+		case 0:
+			return "#ffd700";
+
+		case 1:
+			return "#00bfff";
+
+		case 2:
+			return "#ff00ff";
+
+		case 3:
+		default:
+			return "#00ff00";
+	}
+}
+
+/**
+	@brief Default color for the Q stream of a receive channel, a neighbor of GetChannelColor() so I and Q can be told
+	apart but still look like the same channel
+
+	@param i	Channel number
+ */
+string IIOSDR::GetQStreamColor(size_t i)
+{
+	switch(i % 4)
+	{
+		case 0:
+			return "#ff8000";
+
+		case 1:
+			return "#8080ff";
+
+		case 2:
+			return "#ff4080";
+
+		case 3:
+		default:
+			return "#00d0a0";
+	}
+}
+
+/**
+	@brief Reads an IIO range attribute of the form "[min step max]"
+
+	@param min		Minimum value
+	@param max		Maximum value
+
+	@return		True if the attribute exists and could be parsed
+ */
+static bool ReadRange(
+	IIOContext* ctx, const char* dev, const char* chan, bool output, const string& attr, double& min, double& max)
+{
+	string tmp;
+	if(!ctx->HasChannelAttr(dev, chan, output, attr))
+		return false;
+	if(!ctx->ReadChannelAttr(dev, chan, output, attr, tmp))
+		return false;
+
+	double step;
+	return (3 == sscanf(tmp.c_str(), "[%lf %lf %lf]", &min, &step, &max));
+}
+
+/**
+	@brief Figures out what this radio can do
+
+	We start with defaults for the chip in the radio (the AD9363 in a stock PlutoSDR can't tune as far as an AD9361),
+	then use the ranges published by the driver if they are available since these are authoritative and reflect any
+	firmware unlocking.
+ */
+void IIOSDR::DetectLimits()
+{
+	//Everything we understand is the same as the AD9361 other than the AD9363
+	auto model = m_ctx->GetAttributes()["hw_model"];
+	if(model.find("AD9363") != string::npos)
+	{
+		m_limits.minCenterFreq = 325000000;
+		m_limits.maxCenterFreq = 3800000000;
+		m_limits.maxBandwidth = 20000000;
+	}
+
+	double lo;
+	double hi;
+	if(ReadRange(m_ctx, g_phyDevice, "altvoltage0", true, "frequency_available", lo, hi))
+	{
+		m_limits.minCenterFreq = lo;
+		m_limits.maxCenterFreq = hi;
+	}
+	if(ReadRange(m_ctx, g_phyDevice, "voltage0", false, "rf_bandwidth_available", lo, hi))
+	{
+		m_limits.minBandwidth = lo;
+		m_limits.maxBandwidth = hi;
+	}
+	if(ReadRange(m_ctx, g_phyDevice, "voltage0", false, "sampling_frequency_available", lo, hi))
+	{
+		m_limits.minSampleRate = lo;
+		m_limits.maxSampleRate = hi;
+	}
+	if(ReadRange(m_ctx, g_phyDevice, "voltage0", false, "hardwaregain_available", lo, hi))
+	{
+		m_limits.minGain = lo;
+		m_limits.maxGain = hi;
+	}
+
+	//Gain control modes, in the order the driver lists them
+	m_gainModes.clear();
+	string modes;
+	if(m_ctx->HasChannelAttr(g_phyDevice, "voltage0", false, "gain_control_mode_available") &&
+		m_ctx->ReadChannelAttr(g_phyDevice, "voltage0", false, "gain_control_mode_available", modes))
+	{
+		stringstream ss(modes);
+		string mode;
+		while(ss >> mode)
+			m_gainModes.push_back(mode);
+	}
+	if(m_gainModes.empty())
+		m_gainModes = { "manual", "slow_attack", "fast_attack", "hybrid" };
+}
+
+/**
+	@brief Figures out whether we can transmit
+
+	Transmitting is done with the DDS core in the FPGA, which is what the stock firmware of the radios we support has.
+	Each transmit path has one DDS per tone for each of I and Q, named TXn_I_Fm and TXn_Q_Fm. A tone is a complex
+	sinusoid, made by running the I and Q DDSs at the same frequency 90 degrees apart.
+ */
+void IIOSDR::DetectTransmitter()
+{
+	m_numTx = 0;
+	m_numTones = 0;
+	m_txTones.clear();
+
+	if(!m_ctx->HasDevice(g_ddsDevice))
+		return;
+
+	while( (m_numTones < g_maxTones) && m_ctx->HasChannel(g_ddsDevice, GetToneChannelName(0, m_numTones, false), true) )
+		m_numTones ++;
+	while( (m_numTx < g_maxTx) &&
+		m_ctx->HasChannel(g_ddsDevice, GetToneChannelName(m_numTx, 0, false), true) &&
+		m_ctx->HasChannel(g_ddsDevice, GetToneChannelName(m_numTx, 0, true), true) &&
+		m_ctx->HasChannel(g_phyDevice, "voltage" + to_string(m_numTx), true) )
+	{
+		m_numTx ++;
+	}
+	if( (m_numTx == 0) || (m_numTones == 0) )
+	{
+		m_numTx = 0;
+		m_numTones = 0;
+		return;
+	}
+
+	TxTone off = { 0, 0, false };
+	m_txTones.assign(m_numTx, vector<TxTone>(m_numTones, off));
+	m_txAtten.assign(m_numTx, 0);
+	m_txAttenDirty.assign(m_numTx, false);
+
+	for(size_t i=0; i<m_numTx; i++)
+	{
+		auto chan = new SDRTransmitChannel(
+			this,
+			string("TX") + to_string(i+1),
+			GetChannelColor(m_numRx + i),
+			m_channels.size(),
+			i);
+		m_channels.push_back(chan);
+	}
+
+	//A tone is muted by setting its amplitude to zero, not by disabling its DDS: the DDS core treats "raw" as tied
+	//to a core-wide phase/frequency sync, and toggling it per tone can visibly glitch other, unrelated tones. Force
+	//every DDS on so amplitude is the only thing that controls whether a tone is audible.
+	for(size_t i=0; i<m_numTx; i++)
+	{
+		for(size_t j=0; j<m_numTones; j++)
+		{
+			for(bool q : { false, true })
+			{
+				auto name = GetToneChannelName(i, j, q);
+				m_ctx->WriteChannelAttrInt(g_ddsDevice, name, true, "raw", 1);
+			}
+		}
+	}
+
+	//The TX LO usually has the same range as the RX LO, but use what the radio says if it says something
+	m_txLoMin = m_limits.minCenterFreq;
+	m_txLoMax = m_limits.maxCenterFreq;
+	double lo;
+	double hi;
+	if(ReadRange(m_ctx, g_phyDevice, "altvoltage1", true, "frequency_available", lo, hi))
+	{
+		m_txLoMin = lo;
+		m_txLoMax = hi;
+	}
+	m_txMaxToneFreq = m_sampleRate / 2;
+
+	//The radio calls this a gain, but it's an attenuation so the range is negative
+	if(ReadRange(m_ctx, g_phyDevice, "voltage0", true, "hardwaregain_available", lo, hi))
+	{
+		m_txMinAtten = -hi;
+		m_txMaxAtten = -lo;
+	}
+}
+
+/**
+	@brief Gets the IIO name of one of the DDS channels making up a tone
+
+	@param tx		Zero-based transmit path
+	@param tone		Zero-based tone
+	@param q		True for the Q DDS, false for the I DDS
+ */
+string IIOSDR::GetToneChannelName(size_t tx, size_t tone, bool q)
+{
+	return "TX" + to_string(tx+1) + (q ? "_Q_F" : "_I_F") + to_string(tone+1);
+}
+
+/**
+	@brief Reads the state of a tone from the hardware
+
+	@return		True if the tone could be read
+ */
+bool IIOSDR::ReadTone(size_t tx, size_t tone, TxTone& out)
+{
+	auto iname = GetToneChannelName(tx, tone, false);
+	auto qname = GetToneChannelName(tx, tone, true);
+
+	int64_t freq;
+	int64_t iphase;
+	int64_t qphase;
+	double scale;
+	if( !m_ctx->ReadChannelAttrInt(g_ddsDevice, iname, true, "frequency", freq) ||
+		!m_ctx->ReadChannelAttrDouble(g_ddsDevice, iname, true, "scale", scale) ||
+		!m_ctx->ReadChannelAttrInt(g_ddsDevice, iname, true, "phase", iphase) ||
+		!m_ctx->ReadChannelAttrInt(g_ddsDevice, qname, true, "phase", qphase) )
+	{
+		return false;
+	}
+
+	//Positive frequencies have I leading Q by 90 degrees (phases are in millidegrees), negative ones have Q leading
+	int64_t diff = ((iphase - qphase) % 360000 + 360000) % 360000;
+	bool negative = (diff > 180000);
+
+	out.freq = negative ? -freq : freq;
+	out.amplitude = scale;
+	return true;
+}
+
+/**
+	@brief Writes the state of a tone to the hardware
+
+	Failures are logged by the context.
+ */
+void IIOSDR::WriteTone(size_t tx, size_t tone, const TxTone& in)
+{
+	int64_t freq = llabs(in.freq);
+	bool negative = (in.freq < 0);
+
+	for(bool q : { false, true })
+	{
+		auto name = GetToneChannelName(tx, tone, q);
+
+		//The leading DDS is 90 degrees ahead
+		bool leads = (q == negative);
+		m_ctx->WriteChannelAttrInt(g_ddsDevice, name, true, "phase", leads ? 90000 : 0);
+		m_ctx->WriteChannelAttrInt(g_ddsDevice, name, true, "frequency", freq);
+		m_ctx->WriteChannelAttrDouble(g_ddsDevice, name, true, "scale", in.amplitude);
+
+		//Always keep the DDS enabled; a tone is muted via amplitude=0, not by toggling this off. See DetectTransmitter.
+		m_ctx->WriteChannelAttrInt(g_ddsDevice, name, true, "raw", 1);
+	}
+}
+
+/**
+	@brief Reads the current LO frequency, sample rate, bandwidth, and gain from the hardware and adopts them
+ */
+void IIOSDR::ReadHardwareConfiguration()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+
+	int64_t lo;
+	int64_t rate;
+	int64_t bw;
+	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", lo))
+		m_centerFreq = lo;
+	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "sampling_frequency", rate))
+		m_sampleRate = rate;
+	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "rf_bandwidth", bw))
+		m_span = bw;
+
+	m_hwCenterFreq = m_centerFreq;
+	m_hwSampleRate = m_sampleRate;
+	m_centerFreqDirty = false;
+	m_spanDirty = false;
+	m_sampleRateDirty = false;
+
+	for(size_t i=0; i<m_numRx; i++)
+	{
+		string id = "voltage" + to_string(i);
+		string mode;
+		double gain;
+		if(m_ctx->ReadChannelAttr(g_phyDevice, id, false, "gain_control_mode", mode))
+			m_gainMode[i] = mode;
+		if(m_ctx->ReadChannelAttrDouble(g_phyDevice, id, false, "hardwaregain", gain))
+		{
+			m_gain[i] = gain;
+			m_hwGain[i] = gain;
+		}
+		m_gainDirty[i] = false;
+		m_gainModeDirty[i] = false;
+	}
+
+	if(m_numTx > 0)
+	{
+		int64_t txlo;
+		if(m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage1", true, "frequency", txlo))
+			m_txLoFreq = txlo;
+		m_txLoDirty = false;
+
+		int64_t txrate;
+		if(m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", true, "sampling_frequency", txrate))
+			m_txMaxToneFreq = txrate / 2;
+		else
+			m_txMaxToneFreq = m_sampleRate / 2;
+
+		for(size_t i=0; i<m_numTx; i++)
+		{
+			double gain;
+			if(m_ctx->ReadChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), true, "hardwaregain", gain))
+				m_txAtten[i] = -gain;
+			m_txAttenDirty[i] = false;
+
+			for(size_t j=0; j<m_numTones; j++)
+			{
+				TxTone tone;
+				if(ReadTone(i, j, tone))
+				{
+					m_txTones[i][j] = tone;
+					m_txTones[i][j].dirty = false;
+				}
+			}
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Configuration push (instrument thread)
+
+void IIOSDR::BackgroundProcessing()
+{
+	SCPIInstrument::BackgroundProcessing();
+
+	//Don't leave the radio capturing into a buffer nobody is reading (this is done here, not in Stop(), so the GUI
+	//thread never has to wait for a capture to finish)
+	if(m_ctx && !m_triggerArmed)
+		m_ctx->StopCapture();
+
+	ApplyConfiguration();
+}
+
+/**
+	@brief Pushes any changed settings to the hardware, then reads back what it actually did
+
+	This is intentionally done here rather than in the setters so that we never talk to the radio from the GUI thread.
+ */
+void IIOSDR::ApplyConfiguration()
+{
+	if(!m_ctx)
+		return;
+
+	//Grab the pending changes
+	bool doRate;
+	bool doSpan;
+	bool doFreq;
+	bool sweep;
+	int64_t freq;
+	int64_t span;
+	uint64_t rate;
+	vector<string> gainMode(m_numRx);
+	vector<float> gain(m_numRx);
+	vector<bool> doGainMode(m_numRx);
+	vector<bool> doGain(m_numRx);
+	bool doTxLo = false;
+	int64_t txLo = 0;
+	vector<pair<size_t, size_t> > txPending;
+	vector<TxTone> txPendingTones;
+	vector<float> txAtten(m_numTx);
+	vector<bool> doTxAtten(m_numTx);
+	bool any;
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		doRate = m_sampleRateDirty;
+		doSpan = m_spanDirty;
+		doFreq = m_centerFreqDirty;
+		freq = m_centerFreq;
+		span = m_span;
+		rate = m_sampleRate;
+		m_sampleRateDirty = false;
+		m_spanDirty = false;
+		m_centerFreqDirty = false;
+
+		//Changing the sample rate can start or stop a sweep, and when sweeping the analog bandwidth follows it.
+		//The LO is moved around by AcquireData() while sweeping, so has to go back to the center when we stop.
+		sweep = IsSweeping(m_sweepEnabled, span, rate);
+		doSpan |= doRate;
+		if(!sweep)
+			doFreq |= doSpan;
+
+		any = doRate || doSpan || doFreq;
+		for(size_t i=0; i<m_numRx; i++)
+		{
+			gainMode[i] = m_gainMode[i];
+			gain[i] = m_gain[i];
+
+			doGainMode[i] = m_gainModeDirty[i];
+			m_gainModeDirty[i] = false;
+
+			//The gain can only be set in manual mode. If it's not, leave it pending until we get there.
+			doGain[i] = m_gainDirty[i] && (gainMode[i] == "manual");
+			if(doGain[i])
+				m_gainDirty[i] = false;
+
+			any |= doGainMode[i] || doGain[i];
+		}
+
+		doTxLo = m_txLoDirty;
+		txLo = m_txLoFreq;
+		m_txLoDirty = false;
+		any |= doTxLo;
+
+		for(size_t i=0; i<m_numTx; i++)
+		{
+			txAtten[i] = m_txAtten[i];
+			doTxAtten[i] = m_txAttenDirty[i];
+			m_txAttenDirty[i] = false;
+			any |= doTxAtten[i];
+
+			for(size_t j=0; j<m_numTones; j++)
+			{
+				if(!m_txTones[i][j].dirty)
+					continue;
+
+				txPending.push_back(pair<size_t, size_t>(i, j));
+				txPendingTones.push_back(m_txTones[i][j]);
+				m_txTones[i][j].dirty = false;
+				any = true;
+			}
+		}
+	}
+
+	if(!any)
+		return;
+
+	//Anything captured before an RX setting changed is out of date. Changing the sample rate reconfigures the whole
+	//clock chain, so don't do that with the buffer open.
+	bool rxChanged = doRate || doSpan || doFreq;
+	for(size_t i=0; i<m_numRx; i++)
+		rxChanged |= doGainMode[i] || doGain[i];
+	if(doRate)
+		m_ctx->StopCapture();
+	else if(rxChanged)
+		m_flushCapture = true;
+
+	//Changing the sample rate can change the analog bandwidth, so do it first
+	//(failures are logged by the context, and we resync from the hardware below)
+	if(doRate)
+		m_ctx->WriteChannelAttrInt(g_phyDevice, "voltage0", false, "sampling_frequency", rate);
+	if(doSpan)
+	{
+		int64_t bw = sweep ? GetCaptureBandwidth(rate) : span;
+		m_ctx->WriteChannelAttrInt(g_phyDevice, "voltage0", false, "rf_bandwidth", bw);
+	}
+	if(doFreq && !sweep)
+		m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", freq);
+	if(doTxLo)
+		m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage1", true, "frequency", txLo);
+	for(size_t i=0; i<m_numTx; i++)
+	{
+		if(doTxAtten[i])
+			m_ctx->WriteChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), true, "hardwaregain", -txAtten[i]);
+	}
+
+	//The transmit sample rate follows the receive rate, and tones can't be faster than half of it
+	int64_t maxTone = 0;
+	if(m_numTx > 0)
+	{
+		int64_t txRate;
+		if(m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", true, "sampling_frequency", txRate))
+			maxTone = txRate / 2;
+		else
+			maxTone = m_hwSampleRate / 2;
+	}
+	for(size_t n=0; n<txPending.size(); n++)
+	{
+		auto& tone = txPendingTones[n];
+		tone.freq = min(max(tone.freq, -maxTone), maxTone);
+		WriteTone(txPending[n].first, txPending[n].second, tone);
+	}
+
+	//Mode has to be set before gain
+	for(size_t i=0; i<m_numRx; i++)
+	{
+		string id = "voltage" + to_string(i);
+		if(doGainMode[i])
+			m_ctx->WriteChannelAttr(g_phyDevice, id, false, "gain_control_mode", gainMode[i]);
+		if(doGain[i])
+			m_ctx->WriteChannelAttrDouble(g_phyDevice, id, false, "hardwaregain", gain[i]);
+	}
+
+	//Read back what we actually got. If the user changed something again while we were busy, leave it for next time.
+	int64_t hwFreq;
+	int64_t hwSpan;
+	int64_t hwRate;
+	bool haveFreq = m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", hwFreq);
+	bool haveSpan = m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "rf_bandwidth", hwSpan);
+	bool haveRate = m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "sampling_frequency", hwRate);
+
+	vector<string> hwGainMode(m_numRx);
+	vector<double> hwGain(m_numRx);
+	vector<bool> haveGainMode(m_numRx);
+	vector<bool> haveGain(m_numRx);
+	for(size_t i=0; i<m_numRx; i++)
+	{
+		string id = "voltage" + to_string(i);
+		haveGainMode[i] = m_ctx->ReadChannelAttr(g_phyDevice, id, false, "gain_control_mode", hwGainMode[i]);
+		haveGain[i] = m_ctx->ReadChannelAttrDouble(g_phyDevice, id, false, "hardwaregain", hwGain[i]);
+	}
+
+	int64_t hwTxLo = 0;
+	bool haveTxLo = (m_numTx > 0) && m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage1", true, "frequency", hwTxLo);
+	vector<double> hwTxGain(m_numTx);
+	vector<bool> haveTxGain(m_numTx);
+	for(size_t i=0; i<m_numTx; i++)
+	{
+		haveTxGain[i] = doTxAtten[i] &&
+			m_ctx->ReadChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), true, "hardwaregain", hwTxGain[i]);
+	}
+	vector<TxTone> hwTones(txPending.size());
+	vector<bool> haveTones(txPending.size());
+	for(size_t n=0; n<txPending.size(); n++)
+		haveTones[n] = ReadTone(txPending[n].first, txPending[n].second, hwTones[n]);
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	//When sweeping, neither the LO nor the analog bandwidth are the center frequency and span
+	if(haveFreq)
+	{
+		m_hwCenterFreq = hwFreq;
+		if(!m_centerFreqDirty && !sweep)
+			m_centerFreq = hwFreq;
+	}
+	if(haveSpan && !m_spanDirty && !sweep)
+		m_span = hwSpan;
+	if(haveRate)
+	{
+		m_hwSampleRate = hwRate;
+		if(!m_sampleRateDirty)
+			m_sampleRate = hwRate;
+	}
+	for(size_t i=0; i<m_numRx; i++)
+	{
+		if(haveGainMode[i] && !m_gainModeDirty[i])
+			m_gainMode[i] = hwGainMode[i];
+
+		//If we still owe the radio a gain (waiting for manual mode) don't clobber it with what's there now
+		if(haveGain[i])
+		{
+			m_hwGain[i] = hwGain[i];
+			if(!m_gainDirty[i])
+				m_gain[i] = hwGain[i];
+		}
+	}
+
+	if(m_numTx > 0)
+	{
+		m_txMaxToneFreq = maxTone;
+		if(haveTxLo && !m_txLoDirty)
+			m_txLoFreq = hwTxLo;
+
+		//The radio may have rounded the attenuation
+		for(size_t i=0; i<m_numTx; i++)
+		{
+			if(haveTxGain[i] && !m_txAttenDirty[i])
+				m_txAtten[i] = -hwTxGain[i];
+		}
+
+		//The DDS may not be able to do exactly what we asked for
+		for(size_t n=0; n<txPending.size(); n++)
+		{
+			auto& tone = m_txTones[txPending[n].first][txPending[n].second];
+			if(haveTones[n] && !tone.dirty)
+			{
+				tone = hwTones[n];
+				tone.dirty = false;
+			}
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Accessors
+
+///@brief Return the constant driver name string "iio"
+string IIOSDR::GetDriverNameInternal()
+{
+	return "iio";
+}
+
+bool IIOSDR::HasTimebaseControls()
+{
+	return true;
+}
+
+bool IIOSDR::HasFrequencyControls()
+{
+	return true;
+}
+
+bool IIOSDR::HasResolutionBandwidth()
+{
+	return false;
+}
+
+bool IIOSDR::CanInterleave()
+{
+	return false;
+}
+
+OscilloscopeChannel* IIOSDR::GetExternalTrigger()
+{
+	return nullptr;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Channel configuration
+
+bool IIOSDR::IsChannelEnabled(size_t i)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return (i < m_channelEnabled.size()) && m_channelEnabled[i];
+}
+
+void IIOSDR::EnableChannel(size_t i)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	if(i < m_channelEnabled.size())
+		m_channelEnabled[i] = true;
+}
+
+void IIOSDR::DisableChannel(size_t i)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	if(i < m_channelEnabled.size())
+		m_channelEnabled[i] = false;
+}
+
+OscilloscopeChannel::CouplingType IIOSDR::GetChannelCoupling(size_t /*i*/)
+{
+	//RF input, 50 ohms
+	return OscilloscopeChannel::COUPLE_AC_50;
+}
+
+vector<OscilloscopeChannel::CouplingType> IIOSDR::GetAvailableCouplings(size_t /*i*/)
+{
+	vector<OscilloscopeChannel::CouplingType> ret;
+	ret.push_back(OscilloscopeChannel::COUPLE_AC_50);
+	return ret;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// RX gain
+
+bool IIOSDR::HasGainControl(size_t i)
+{
+	return m_ctx && (i < m_numRx);
+}
+
+vector<string> IIOSDR::GetGainModes(size_t i)
+{
+	if(!HasGainControl(i))
+		return vector<string>();
+	return m_gainModes;
+}
+
+string IIOSDR::GetGainMode(size_t i)
+{
+	if(!HasGainControl(i))
+		return "";
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_gainMode[i];
+}
+
+void IIOSDR::SetGainMode(size_t i, const string& mode)
+{
+	if(!HasGainControl(i))
+		return;
+
+	if(find(m_gainModes.begin(), m_gainModes.end(), mode) == m_gainModes.end())
+	{
+		LogWarning("Unsupported IIO gain control mode \"%s\"\n", mode.c_str());
+		return;
+	}
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_gainMode[i] = mode;
+	m_gainModeDirty[i] = true;
+}
+
+bool IIOSDR::IsGainAdjustable(size_t i)
+{
+	return HasGainControl(i) && (GetGainMode(i) == "manual");
+}
+
+pair<float, float> IIOSDR::GetGainRange(size_t /*i*/)
+{
+	return pair<float, float>(m_limits.minGain, m_limits.maxGain);
+}
+
+float IIOSDR::GetGain(size_t i)
+{
+	if(!HasGainControl(i))
+		return 0;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_gain[i];
+}
+
+void IIOSDR::SetGain(size_t i, float gain)
+{
+	if(!HasGainControl(i))
+		return;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_gain[i] = min(max(gain, m_limits.minGain), m_limits.maxGain);
+	m_gainDirty[i] = true;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Level correction
+
+bool IIOSDR::HasLevelCorrection(size_t i)
+{
+	return m_ctx && (i < m_numRx);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Received signal strength
+
+bool IIOSDR::HasRSSI(size_t i)
+{
+	return m_ctx && (i < m_hasRSSI.size()) && m_hasRSSI[i];
+}
+
+bool IIOSDR::IsRSSIEnabled(size_t i)
+{
+	if(!HasRSSI(i))
+		return false;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_rssiEnabled[i];
+}
+
+void IIOSDR::SetRSSIEnabled(size_t i, bool enable)
+{
+	if(!HasRSSI(i))
+		return;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_rssiEnabled[i] = enable;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Transmit control
+
+size_t IIOSDR::GetTxChannelCount()
+{
+	return m_numTx;
+}
+
+size_t IIOSDR::GetTxToneCount(size_t tx)
+{
+	if(tx >= m_numTx)
+		return 0;
+	return m_numTones;
+}
+
+int64_t IIOSDR::GetTxLOFrequency()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txLoFreq;
+}
+
+void IIOSDR::SetTxLOFrequency(int64_t freq)
+{
+	if(m_numTx == 0)
+		return;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_txLoFreq = min(max(freq, m_txLoMin), m_txLoMax);
+	m_txLoDirty = true;
+}
+
+pair<int64_t, int64_t> IIOSDR::GetTxLOFrequencyRange()
+{
+	return pair<int64_t, int64_t>(m_txLoMin, m_txLoMax);
+}
+
+int64_t IIOSDR::GetTxToneFrequency(size_t tx, size_t tone)
+{
+	if( (tx >= m_numTx) || (tone >= m_numTones) )
+		return 0;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txTones[tx][tone].freq;
+}
+
+void IIOSDR::SetTxToneFrequency(size_t tx, size_t tone, int64_t freq)
+{
+	if( (tx >= m_numTx) || (tone >= m_numTones) )
+		return;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+
+	//The transmit rate follows the receive rate, so if that's about to change use the new one
+	int64_t limit = m_sampleRateDirty ? static_cast<int64_t>(m_sampleRate / 2) : m_txMaxToneFreq;
+	m_txTones[tx][tone].freq = min(max(freq, -limit), limit);
+	m_txTones[tx][tone].dirty = true;
+}
+
+pair<int64_t, int64_t> IIOSDR::GetTxToneFrequencyRange(size_t /*tx*/)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	int64_t limit = m_sampleRateDirty ? static_cast<int64_t>(m_sampleRate / 2) : m_txMaxToneFreq;
+	return pair<int64_t, int64_t>(-limit, limit);
+}
+
+float IIOSDR::GetTxAttenuation(size_t tx)
+{
+	if(tx >= m_numTx)
+		return 0;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txAtten[tx];
+}
+
+void IIOSDR::SetTxAttenuation(size_t tx, float atten)
+{
+	if(tx >= m_numTx)
+		return;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_txAtten[tx] = min(max(atten, m_txMinAtten), m_txMaxAtten);
+	m_txAttenDirty[tx] = true;
+}
+
+pair<float, float> IIOSDR::GetTxAttenuationRange(size_t /*tx*/)
+{
+	return pair<float, float>(m_txMinAtten, m_txMaxAtten);
+}
+
+float IIOSDR::GetTxToneAmplitude(size_t tx, size_t tone)
+{
+	if( (tx >= m_numTx) || (tone >= m_numTones) )
+		return 0;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txTones[tx][tone].amplitude;
+}
+
+void IIOSDR::SetTxToneAmplitude(size_t tx, size_t tone, float amplitude)
+{
+	if( (tx >= m_numTx) || (tone >= m_numTones) )
+		return;
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_txTones[tx][tone].amplitude = min(max(amplitude, 0.0f), 1.0f);
+	m_txTones[tx][tone].dirty = true;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Timebase and LO configuration
+
+uint64_t IIOSDR::GetSampleRate()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_sampleRate;
+}
+
+void IIOSDR::SetSampleRate(uint64_t rate)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_sampleRate = min(max(rate, m_limits.minSampleRate), m_limits.maxSampleRate);
+	m_sampleRateDirty = true;
+}
+
+uint64_t IIOSDR::GetSampleDepth()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_sampleDepth;
+}
+
+void IIOSDR::SetSampleDepth(uint64_t depth)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_sampleDepth = depth;
+}
+
+vector<uint64_t> IIOSDR::GetSampleRatesNonInterleaved()
+{
+	//Common rates that the AD936x clock chain can generate
+	static const uint64_t rates[] =
+	{
+		2500000,
+		3000000,
+		4000000,
+		5000000,
+		6000000,
+		8000000,
+		10000000,
+		12000000,
+		15000000,
+		20000000,
+		25000000,
+		30720000,
+		40000000,
+		50000000,
+		61440000
+	};
+
+	vector<uint64_t> ret;
+	for(auto r : rates)
+	{
+		if( (r >= m_limits.minSampleRate) && (r <= m_limits.maxSampleRate) )
+			ret.push_back(r);
+	}
+	return ret;
+}
+
+vector<uint64_t> IIOSDR::GetSampleDepthsNonInterleaved()
+{
+	return { 1024, 4096, 16384, 65536, 262144, 1048576 };
+}
+
+void IIOSDR::SetSpan(int64_t span)
+{
+	//When sweeping, anything wider than we can capture at once is swept, up to the whole tuning range
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	int64_t maxSpan = m_limits.maxBandwidth;
+	if(m_sweepEnabled)
+		maxSpan = m_limits.maxCenterFreq - m_limits.minCenterFreq + m_limits.maxBandwidth;
+	m_span = min(max(span, m_limits.minBandwidth), maxSpan);
+	m_spanDirty = true;
+}
+
+bool IIOSDR::CanSweep()
+{
+	return true;
+}
+
+bool IIOSDR::IsSweepEnabled()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_sweepEnabled;
+}
+
+void IIOSDR::SetSweepEnabled(bool enable)
+{
+	//Turning sweeping off cuts the span down to what we can capture at once. Either way, mark the span dirty so
+	//ApplyConfiguration() works out whether we're sweeping now (and puts the LO back in the center if not).
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_sweepEnabled = enable;
+	if(!enable)
+		m_span = min(m_span, m_limits.maxBandwidth);
+	m_spanDirty = true;
+}
+
+/**
+	@brief Gets how far apart the LO steps of a sweep are, as a fraction of the capture bandwidth
+ */
+double IIOSDR::GetSweepStepFraction()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_sweepStepFraction;
+}
+
+/**
+	@brief Sets how far apart the LO steps of a sweep are, as a fraction of the capture bandwidth
+
+	Smaller steps mean more overlap between adjacent captures, so less of the edges of each one (where the analog
+	filter rolls off and ADC noise isn't fully filtered out) is used, at the cost of more steps per sweep. A sweep in
+	progress starts over with the new steps.
+
+	@param fraction	Step as a fraction of the capture bandwidth, clamped to 0.1 - 1
+ */
+void IIOSDR::SetSweepStepFraction(double fraction)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_sweepStepFraction = min(max(fraction, g_minSweepStepFraction), g_maxSweepStepFraction);
+}
+
+/**
+	@brief Gets the width of the spectrum we can capture at once at a given sample rate
+
+	@param rate	Sample rate in Hz
+ */
+int64_t IIOSDR::GetCaptureBandwidth(uint64_t rate)
+{
+	return min(max(static_cast<int64_t>(rate), m_limits.minBandwidth), m_limits.maxBandwidth);
+}
+
+/**
+	@brief Checks if we have to sweep the LO across a span, because sweeping is enabled and it's too wide to capture
+	at once
+
+	@param enabled	True if sweeping is enabled
+	@param span		Span in Hz
+	@param rate		Sample rate in Hz
+ */
+bool IIOSDR::IsSweeping(bool enabled, int64_t span, uint64_t rate)
+{
+	return enabled && (span > GetCaptureBandwidth(rate));
+}
+
+/**
+	@brief Works out the LO frequencies to sweep across a span, in ascending order
+
+	The step is a whole number of FFT bins (for an FFT the length of a capture), so that the bins of adjacent
+	captures line up. The first and last captures are centered on the span, and may go a little past the ends of it.
+
+	@param center	Center of the span in Hz
+	@param span		Width of the span in Hz
+	@param rate		Sample rate in Hz
+	@param depth	Number of samples per capture
+	@param fraction	Step as a fraction of the capture bandwidth
+ */
+vector<int64_t> IIOSDR::GetSweepFrequencies(int64_t center, int64_t span, uint64_t rate, size_t depth, double fraction)
+{
+	double bin = static_cast<double>(rate) / depth;
+	double step = max(1.0, floor(GetCaptureBandwidth(rate) * fraction / bin)) * bin;
+	size_t n = ceil(span / step);
+
+	//Steps past the end of the tuning range all end up at the end, so skip duplicates
+	vector<int64_t> ret;
+	for(size_t i=0; i<n; i++)
+	{
+		int64_t f = llround(center + (i - (n - 1) / 2.0) * step);
+		f = min(max(f, m_limits.minCenterFreq), m_limits.maxCenterFreq);
+		if(ret.empty() || (f > ret.back()) )
+			ret.push_back(f);
+	}
+	return ret;
+}
+
+/**
+	@brief Moves the RX LO in the middle of a sweep, and waits for it to settle
+
+	Only called from the instrument thread.
+
+	@param freq	New LO frequency in Hz
+ */
+void IIOSDR::Retune(int64_t freq)
+{
+	m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", freq);
+
+	//The synthesizer can't necessarily hit the exact frequency
+	int64_t hwFreq;
+	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", hwFreq))
+		m_hwCenterFreq = hwFreq;
+	else
+		m_hwCenterFreq = freq;
+
+	this_thread::sleep_for(g_sweepSettleTime);
+}
+
+int64_t IIOSDR::GetSpan()
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_span;
+}
+
+void IIOSDR::SetCenterFrequency(size_t /*channel*/, int64_t freq)
+{
+	//There's only one RX LO, shared by all receive paths
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_centerFreq = min(max(freq, m_limits.minCenterFreq), m_limits.maxCenterFreq);
+	m_centerFreqDirty = true;
+}
+
+int64_t IIOSDR::GetCenterFrequency(size_t /*channel*/)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_centerFreq;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Triggering
+
+void IIOSDR::Start()
+{
+	m_sweepRestart = true;
+	m_flushCapture = true;
+	m_triggerArmed = true;
+	m_triggerOneShot = false;
+}
+
+void IIOSDR::StartSingleTrigger()
+{
+	m_sweepRestart = true;
+	m_flushCapture = true;
+	m_triggerArmed = true;
+	m_triggerOneShot = true;
+}
+
+void IIOSDR::Stop()
+{
+	m_triggerArmed = false;
+}
+
+void IIOSDR::ForceTrigger()
+{
+	//No trigger, so this is the same as a single capture
+	m_sweepRestart = true;
+	m_flushCapture = true;
+	m_triggerArmed = true;
+	m_triggerOneShot = true;
+}
+
+bool IIOSDR::IsTriggerArmed()
+{
+	return m_triggerArmed;
+}
+
+void IIOSDR::PushTrigger()
+{
+	//no triggering
+}
+
+void IIOSDR::PullTrigger()
+{
+	//no triggering
+}
+
+Oscilloscope::TriggerMode IIOSDR::PollTrigger()
+{
+	if(!m_triggerArmed)
+		return TRIGGER_MODE_STOP;
+
+	//If there's nothing to capture, don't spin
+	bool anyEnabled = false;
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		for(bool e : m_channelEnabled)
+			anyEnabled |= e;
+	}
+	if(!m_ctx || !anyEnabled)
+	{
+		this_thread::sleep_for(chrono::milliseconds(5));
+		return TRIGGER_MODE_RUN;
+	}
+
+	//There's no trigger, we always capture as soon as we're armed. Report "triggered" so that we block in
+	//AcquireData() until the samples arrive.
+	return TRIGGER_MODE_TRIGGERED;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Waveform acquisition
+
+/**
+	@brief Converts the I and Q samples of an RX path to floating point, and checks them for clipping
+
+	@param isrc		First I sample, in ADC counts
+	@param qsrc		First Q sample, in ADC counts
+	@param step		Distance from one sample to the next of the same channel, in samples
+	@param depth	Number of samples
+	@param scale	Value of one ADC count
+	@param iout		I output
+	@param qout		Q output
+
+	@return			True if any sample was at full scale
+ */
+static bool ConvertIQ(
+	const int16_t* isrc,
+	const int16_t* qsrc,
+	size_t step,
+	size_t depth,
+	float scale,
+	float* iout,
+	float* qout)
+{
+	//|x| >= g_adcClipCounts exactly when x + g_adcClipCounts - 1 is outside 0 to 2*g_adcClipCounts - 2, which is
+	//one unsigned compare. Doing it without a branch, and with raw pointers, lets the compiler vectorize the loops.
+	const unsigned clipOffset = g_adcClipCounts - 1;
+	const unsigned clipRange = 2 * g_adcClipCounts - 2;
+	unsigned clipping = 0;
+
+	//If I and Q are next to each other with nothing else in between (one RX path), read each pair as a 32 bit word
+	//so the loads are contiguous, which is a few times faster since it vectorizes. I is the low half of the word on a
+	//little endian host.
+	uint16_t one = 1;
+	uint8_t firstByte;
+	memcpy(&firstByte, &one, 1);
+	if( (step == 2) && (qsrc == isrc + 1) && (firstByte == 1) )
+	{
+		for(size_t j=0; j<depth; j++)
+		{
+			uint32_t word;
+			memcpy(&word, isrc + j*2, sizeof(word));
+			int i = static_cast<int16_t>(word & 0xffff);
+			int q = static_cast<int16_t>(word >> 16);
+			iout[j] = i * scale;
+			qout[j] = q * scale;
+			clipping |= (static_cast<unsigned>(i + clipOffset) > clipRange) |
+				(static_cast<unsigned>(q + clipOffset) > clipRange);
+		}
+	}
+
+	//Anything else (two RX paths, samples converted by libiio, etc)
+	else
+	{
+		for(size_t j=0; j<depth; j++)
+		{
+			int i = isrc[j*step];
+			int q = qsrc[j*step];
+			iout[j] = i * scale;
+			qout[j] = q * scale;
+			clipping |= (static_cast<unsigned>(i + clipOffset) > clipRange) |
+				(static_cast<unsigned>(q + clipOffset) > clipRange);
+		}
+	}
+
+	return (clipping != 0);
+}
+
+bool IIOSDR::AcquireData()
+{
+	if(!m_ctx)
+		return false;
+
+	//Snapshot what we're capturing. Channels come in I/Q pairs (voltage0 = RX1 I, voltage1 = RX1 Q, ...)
+	vector<size_t> paths;
+	vector<bool> readRSSI;
+	vector<bool> agc;
+	vector<string> iioChannels;
+	size_t depth;
+	bool sweepEnabled;
+	double sweepStepFraction;
+	int64_t span;
+	int64_t center;
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		depth = m_sampleDepth;
+		sweepEnabled = m_sweepEnabled;
+		sweepStepFraction = m_sweepStepFraction;
+		span = m_span;
+		center = m_centerFreq;
+		for(size_t i=0; i<m_numRx; i++)
+		{
+			if(!m_channelEnabled[i])
+				continue;
+			paths.push_back(i);
+			readRSSI.push_back(m_rssiEnabled[i]);
+			agc.push_back(m_gainMode[i] != "manual");
+			iioChannels.push_back("voltage" + to_string(i*2));
+			iioChannels.push_back("voltage" + to_string(i*2 + 1));
+		}
+	}
+	if(paths.empty())
+		return false;
+
+	//If the span is too wide to capture at once, move on to the next step of the sweep.
+	//Start over at the beginning if the sweep finished, or if the user changed it.
+	bool sweepDone = true;
+	bool sweeping = IsSweeping(sweepEnabled, span, m_hwSampleRate);
+	bool flush = m_flushCapture.exchange(false);
+	if(sweeping)
+	{
+		auto freqs = GetSweepFrequencies(center, span, m_hwSampleRate, depth, sweepStepFraction);
+		if(m_sweepRestart.exchange(false) || (freqs != m_sweepFreqs) || (m_sweepStep >= freqs.size()) )
+		{
+			m_sweepFreqs = freqs;
+			m_sweepStep = 0;
+		}
+		if(m_sweepStep == 0)
+			m_sweepStartTime = GetTime();
+
+		int64_t lo = m_sweepFreqs[m_sweepStep];
+		m_sweepStep ++;
+		sweepDone = (m_sweepStep >= m_sweepFreqs.size());
+		if(lo != m_hwCenterFreq)
+		{
+			Retune(lo);
+			flush = true;
+		}
+	}
+	else
+		m_sweepFreqs.clear();
+
+	//If what's already in the buffer is out of date, throw all of it away
+	size_t kernelBuffers = sweeping ? g_sweepKernelBuffers : g_kernelBuffers;
+	size_t discard = 0;
+	if(flush)
+		discard = sweeping ? g_sweepDiscard : kernelBuffers;
+
+	//Sample rate and LO are not necessarily what the user last asked for, they're what's in the hardware now.
+	//(only this thread applies configuration, so these can't change during the capture)
+	double now = GetTime();
+	int64_t centerFreq = m_hwCenterFreq;
+	int64_t fs_per_sample = FS_PER_SECOND / m_hwSampleRate;
+
+	//Convert the samples while they're still in the capture buffer.
+	//(AGC moves the gain around by itself, so find out what it was for this capture: read after the capture, like the
+	//RSSI, and only while AGC is running since it's a round trip to the radio)
+	SequenceSet s;
+	auto consume = [&](const IIOSampleBlock& block)
+	{
+		for(size_t n=0; n<paths.size(); n++)
+		{
+			size_t i = paths[n];
+			if(agc[n])
+			{
+				double gain;
+				if(m_ctx->ReadChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), false, "hardwaregain", gain))
+				{
+					m_hwGain[i] = gain;
+
+					lock_guard<recursive_mutex> lock(m_cacheMutex);
+					if(!m_gainDirty[i])
+						m_gain[i] = gain;
+				}
+			}
+
+			//Refer the samples to the input, taking out the gain of the radio and whatever is in front of it
+			float scale = g_adcScale * pow(10, -GetInputGain(i, centerFreq, m_hwGain[i]) / 20);
+
+			string base = m_nickname + "." + GetOscilloscopeChannel(i)->GetHwname();
+			auto icap = AllocateAnalogWaveform(base + ".i");
+			icap->m_timescale = fs_per_sample;
+			icap->m_triggerPhase = 0;
+			icap->m_startTimestamp = floor(now);
+			icap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
+			icap->Resize(depth);
+
+			auto qcap = AllocateAnalogWaveform(base + ".q");
+			qcap->m_timescale = fs_per_sample;
+			qcap->m_triggerPhase = 0;
+			qcap->m_startTimestamp = floor(now);
+			qcap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
+			qcap->Resize(depth);
+
+			icap->PrepareForCpuAccess();
+			qcap->PrepareForCpuAccess();
+			bool clipping = ConvertIQ(
+				block.first[n*2],
+				block.first[n*2 + 1],
+				block.step,
+				depth,
+				scale,
+				icap->m_samples.GetCpuPointer(),
+				qcap->m_samples.GetCpuPointer());
+			icap->MarkSamplesModifiedFromCpu();
+			qcap->MarkSamplesModifiedFromCpu();
+			if(clipping)
+			{
+				icap->m_flags |= WaveformBase::WAVEFORM_CLIPPING;
+				qcap->m_flags |= WaveformBase::WAVEFORM_CLIPPING;
+			}
+
+			s[StreamDescriptor(GetChannel(i), 0)] = icap;
+			s[StreamDescriptor(GetChannel(i), 1)] = qcap;
+		}
+	};
+	if(!m_ctx->CaptureBlock(g_rxDevice, iioChannels, depth, kernelBuffers, discard, consume))
+	{
+		//Don't spin on a failing capture, stop and let the user sort it out
+		LogError("IIO capture failed, stopping acquisition\n");
+		m_triggerArmed = false;
+		return false;
+	}
+
+	vector<PendingScalars> scalars;
+	for(size_t n=0; n<paths.size(); n++)
+	{
+		size_t i = paths[n];
+
+		//Read after the capture so it's for the same LO (this is a round trip to the radio, so only if asked for)
+		//The AD9361 RSSI is 0 to -128 dB, referenced to the chip's input with the receive gain taken out (UG-570,
+		//"RSSI Symbol"), but the Linux driver prints the register with %u so the sign is lost. Put it back.
+		double rssi = NAN;
+		if(readRSSI[n])
+		{
+			if(m_ctx->ReadChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), false, "rssi", rssi))
+				rssi = -rssi;
+			else
+				rssi = NAN;
+		}
+		scalars.push_back({i, centerFreq, rssi});
+	}
+
+	if(sweeping && sweepDone)
+	{
+		double dt = (GetTime() - m_sweepStartTime) * 1000;
+		LogDebug("IIO SDR: sweep of %zu steps took %.1f ms (%.2f ms per step)\n",
+			m_sweepFreqs.size(), dt, dt / m_sweepFreqs.size());
+	}
+
+	//Save the waveforms to our queue, along with the center frequency and RSSI that go with them
+	m_pendingWaveformsMutex.lock();
+	m_pendingWaveforms.push_back(s);
+	m_pendingScalars.push_back(scalars);
+	m_pendingWaveformsMutex.unlock();
+
+	//If this was a one-shot trigger we're no longer armed (once we've been all the way across the sweep)
+	if(m_triggerOneShot && sweepDone)
+		m_triggerArmed = false;
+
+	return true;
+}
+
+/**
+	@brief Pops the oldest set of waveforms, and puts the center frequency and RSSI they were captured with on the
+	channels
+ */
+bool IIOSDR::PopPendingWaveform()
+{
+	lock_guard<mutex> lock(m_pendingWaveformsMutex);
+	if(m_pendingWaveforms.empty())
+		return false;
+
+	for(auto it : m_pendingWaveforms.front())
+		it.first.m_channel->SetData(it.second, it.first.m_stream);
+	m_pendingWaveforms.pop_front();
+
+	if(!m_pendingScalars.empty())
+	{
+		for(auto& p : m_pendingScalars.front())
+		{
+			auto chan = dynamic_cast<ComplexChannel*>(GetChannel(p.m_channel));
+			chan->UpdateCenterFrequency(p.m_center);
+			chan->SetScalarValue(m_rssiStream, p.m_rssi);
+		}
+		m_pendingScalars.pop_front();
+	}
+
+	m_downloadClock.Tick();
+	return true;
+}
+
+/**
+	@brief Throws away all pending waveforms, along with their center frequency and RSSI
+
+	(both at once, so a capture queued in the meantime can't end up with the wrong values)
+ */
+void IIOSDR::ClearPendingWaveforms()
+{
+	lock_guard<mutex> lock(m_pendingWaveformsMutex);
+	for(auto& set : m_pendingWaveforms)
+	{
+		for(auto& it : set)
+			delete it.second;
+	}
+	m_pendingWaveforms.clear();
+	m_pendingScalars.clear();
+}
+
+#endif

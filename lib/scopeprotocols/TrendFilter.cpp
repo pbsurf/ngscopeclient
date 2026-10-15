@@ -1,0 +1,260 @@
+/***********************************************************************************************************************
+*                                                                                                                      *
+* libscopeprotocols                                                                                                    *
+*                                                                                                                      *
+* Copyright (c) 2012-2026 Andrew D. Zonenberg and contributors                                                         *
+* All rights reserved.                                                                                                 *
+*                                                                                                                      *
+* Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
+* following conditions are met:                                                                                        *
+*                                                                                                                      *
+*    * Redistributions of source code must retain the above copyright notice, this list of conditions, and the         *
+*      following disclaimer.                                                                                           *
+*                                                                                                                      *
+*    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the       *
+*      following disclaimer in the documentation and/or other materials provided with the distribution.                *
+*                                                                                                                      *
+*    * Neither the name of the author nor the names of any contributors may be used to endorse or promote products     *
+*      derived from this software without specific prior written permission.                                           *
+*                                                                                                                      *
+* THIS SOFTWARE IS PROVIDED BY THE AUTHORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED   *
+* TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL *
+* THE AUTHORS BE HELD LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES        *
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR       *
+* BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT *
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE       *
+* POSSIBILITY OF SUCH DAMAGE.                                                                                          *
+*                                                                                                                      *
+***********************************************************************************************************************/
+
+#include "../scopehal/scopehal.h"
+#include "TrendFilter.h"
+
+using namespace std;
+
+///@brief Timestamp resolution of the output waveform (1 ns, well below the precision of GetTime())
+static const int64_t TREND_TIMESCALE = 1000000;
+
+///@brief Largest time step between two samples, in TREND_TIMESCALE ticks (about 31 years)
+static const double TREND_MAX_DELTA = 1e18;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Construction / destruction
+
+TrendFilter::TrendFilter(const string& color)
+	: PausableFilter(color, CAT_MATH)
+	, m_tlast(0)
+	, m_depth(m_parameters["Buffer length"])
+{
+	AddStream(Unit(Unit::UNIT_VOLTS), "data", Stream::STREAM_TYPE_ANALOG);
+	CreateInput<InputConstraintStreamTypes>(
+		"din",
+		initializer_list<Stream::StreamType>
+		{
+			Stream::STREAM_TYPE_ANALOG_SCALAR,
+			Stream::STREAM_TYPE_DIGITAL_SCALAR
+		});
+	m_depth = FilterParameter(FilterParameter::TYPE_INT, Unit(Unit::UNIT_SAMPLEDEPTH));
+	m_depth.SetIntVal(10000);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Accessors
+
+string TrendFilter::GetProtocolName()
+{
+	return "Trend";
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Actual decoder logic
+
+bool TrendFilter::ShouldPersistWaveform()
+{
+	//Our waveform should be saved since it's not possible to generate from the input
+	return true;
+}
+
+void TrendFilter::ClearSweeps()
+{
+	SetData(nullptr, 0);
+}
+
+/**
+	@brief Get the time since the previous sample, in output timescale ticks
+
+	Also converts waveforms loaded from older sessions (which used femtosecond ticks) to the current timescale, and
+	recovers the time of the last sample if the waveform was loaded from a saved session.
+
+	Must be called before the waveform start timestamp is updated.
+ */
+int64_t TrendFilter::GetTimeDelta(SparseWaveformBase* wfm, double now)
+{
+	if(wfm->m_timescale != TREND_TIMESCALE)
+	{
+		double scale = static_cast<double>(wfm->m_timescale) / TREND_TIMESCALE;
+		size_t len = wfm->m_offsets.size();
+		for(size_t i=0; i<len; i++)
+		{
+			wfm->m_offsets[i] = llround(wfm->m_offsets[i] * scale);
+			wfm->m_durations[i] = llround(wfm->m_durations[i] * scale);
+		}
+		wfm->m_timescale = TREND_TIMESCALE;
+	}
+
+	//The most recent sample is always at offset zero, so the waveform start time is when it arrived
+	if( (m_tlast == 0) && !wfm->m_offsets.empty())
+		m_tlast = wfm->m_startTimestamp + wfm->m_startFemtoseconds / FS_PER_SECOND;
+
+	//Clamp to avoid overflow if the clock jumps (negative steps would put samples out of order)
+	double dt = (now - m_tlast) * FS_PER_SECOND / TREND_TIMESCALE;
+	return llround(clamp(dt, 0.0, TREND_MAX_DELTA));
+}
+
+void TrendFilter::Refresh(
+	[[maybe_unused]] vk::raii::CommandBuffer& cmdBuf,
+	[[maybe_unused]] shared_ptr<QueueHandle> queue)
+{
+	#ifdef HAVE_NVTX
+		nvtx3::scoped_range nrange("TrendFilter::Refresh");
+	#endif
+	ClearMessages();
+
+	if(!ShouldRefresh())
+		return;
+
+	auto din = GetInput(0);
+	if(!din)
+	{
+		AddErrorMessage("Missing input", "One or more inputs are unconnected");
+		return;
+	}
+
+	m_streams[0].m_yAxisUnit = din.GetYAxisUnits();
+
+	double now = GetTime();
+
+	//Analog path
+	if(din.GetType() == Stream::STREAM_TYPE_ANALOG_SCALAR)
+	{
+		//Update output stream type
+		m_streams[0].m_stype = Stream::STREAM_TYPE_ANALOG;
+
+		//See if we have output already
+		auto wfm = dynamic_cast<SparseAnalogWaveform*>(GetData(0));
+		if(wfm)
+		{
+			//Remove old samples
+			size_t nmax = m_depth.GetIntVal();
+			while(wfm->m_samples.size() > nmax)
+			{
+				wfm->m_samples.pop_front();
+				wfm->m_durations.pop_front();
+				wfm->m_offsets.pop_front();
+			}
+		}
+		else
+		{
+			wfm = new SparseAnalogWaveform;
+			SetData(wfm, 0);
+
+			wfm->m_triggerPhase = 0;
+			wfm->m_timescale = TREND_TIMESCALE;
+			m_tlast = now;
+		}
+		wfm->PrepareForCpuAccess();
+		wfm->m_revision ++;
+
+		//Update duration of previous sample
+		size_t len = wfm->m_samples.size();
+		int64_t dt = GetTimeDelta(wfm, now);
+		if(len > 0)
+			wfm->m_durations[len-1] = dt;
+
+		//Update timestamp
+		wfm->m_startTimestamp = floor(now);
+		wfm->m_startFemtoseconds = (now - wfm->m_startTimestamp) * FS_PER_SECOND;
+
+		//Add the new sample
+		wfm->m_samples.push_back(din.GetScalarValue());
+		wfm->m_durations.push_back(dt);
+		if(wfm->m_offsets.empty())
+			wfm->m_offsets.push_back(0);
+		else
+			wfm->m_offsets.push_back(dt + wfm->m_offsets[len-1]);
+
+		//Update offsets of old samples
+		len = wfm->m_samples.size();
+		for(size_t i=0; i<len; i++)
+			wfm->m_offsets[i] -= dt;
+
+		wfm->MarkModifiedFromCpu();
+	}
+
+	//Digital path
+	else
+	{
+		//Update output stream type
+		m_streams[0].m_stype = Stream::STREAM_TYPE_DIGITAL;
+
+		auto width = din.GetDigitalWidth();
+		if(width > 1)
+		{
+			AddErrorMessage("Invalid input", "Trending multi-bit digital values is not yet supported");
+			return;
+		}
+
+		//See if we have output already
+		auto wfm = dynamic_cast<SparseDigitalWaveform*>(GetData(0));
+		if(wfm)
+		{
+			//Remove old samples
+			size_t nmax = m_depth.GetIntVal();
+			while(wfm->m_samples.size() > nmax)
+			{
+				wfm->m_samples.pop_front();
+				wfm->m_durations.pop_front();
+				wfm->m_offsets.pop_front();
+			}
+		}
+		else
+		{
+			wfm = new SparseDigitalWaveform;
+			SetData(wfm, 0);
+
+			wfm->m_triggerPhase = 0;
+			wfm->m_timescale = TREND_TIMESCALE;
+			m_tlast = now;
+		}
+		wfm->PrepareForCpuAccess();
+		wfm->m_revision ++;
+
+		//Update duration of previous sample
+		size_t len = wfm->m_samples.size();
+		int64_t dt = GetTimeDelta(wfm, now);
+		if(len > 0)
+			wfm->m_durations[len-1] = dt;
+
+		//Update timestamp
+		wfm->m_startTimestamp = floor(now);
+		wfm->m_startFemtoseconds = (now - wfm->m_startTimestamp) * FS_PER_SECOND;
+
+
+		//Add the new sample
+		wfm->m_samples.push_back(din.GetDigitalScalarValue());
+		wfm->m_durations.push_back(dt);
+		if(wfm->m_offsets.empty())
+			wfm->m_offsets.push_back(0);
+		else
+			wfm->m_offsets.push_back(dt + wfm->m_offsets[len-1]);
+
+		//Update offsets of old samples
+		len = wfm->m_samples.size();
+		for(size_t i=0; i<len; i++)
+			wfm->m_offsets[i] -= dt;
+
+		wfm->MarkModifiedFromCpu();
+	}
+
+	m_tlast = now;
+}

@@ -1,0 +1,358 @@
+/***********************************************************************************************************************
+*                                                                                                                      *
+* libscopehal                                                                                                          *
+*                                                                                                                      *
+* Copyright (c) 2012-2026 Andrew D. Zonenberg and contributors                                                         *
+* All rights reserved.                                                                                                 *
+*                                                                                                                      *
+* Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
+* following conditions are met:                                                                                        *
+*                                                                                                                      *
+*    * Redistributions of source code must retain the above copyright notice, this list of conditions, and the         *
+*      following disclaimer.                                                                                           *
+*                                                                                                                      *
+*    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the       *
+*      following disclaimer in the documentation and/or other materials provided with the distribution.                *
+*                                                                                                                      *
+*    * Neither the name of the author nor the names of any contributors may be used to endorse or promote products     *
+*      derived from this software without specific prior written permission.                                           *
+*                                                                                                                      *
+* THIS SOFTWARE IS PROVIDED BY THE AUTHORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED   *
+* TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL *
+* THE AUTHORS BE HELD LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES        *
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR       *
+* BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT *
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE       *
+* POSSIBILITY OF SUCH DAMAGE.                                                                                          *
+*                                                                                                                      *
+***********************************************************************************************************************/
+
+/**
+	@file
+	@author Andrew D. Zonenberg
+	@brief Declaration of SCPISDR
+ */
+
+#ifndef SCPISDR_h
+#define SCPISDR_h
+
+#include "SDRTransmitChannel.h"
+
+/**
+	@brief Generic representation of an optical (UV-VIS-IR) spectrometer
+ */
+class SCPISDR : public virtual SCPIOscilloscope
+{
+public:
+	SCPISDR();
+	virtual ~SCPISDR();
+
+	virtual unsigned int GetInstrumentTypes() const override;
+	virtual uint32_t GetInstrumentTypesForChannel(size_t i) const override;
+
+	//Channel configuration
+	virtual bool IsChannelEnabled(size_t i) override;
+	virtual void EnableChannel(size_t i) override;
+	virtual void DisableChannel(size_t i) override;
+	virtual OscilloscopeChannel::CouplingType GetChannelCoupling(size_t i) override;
+	virtual void SetChannelCoupling(size_t i, OscilloscopeChannel::CouplingType type) override;
+	virtual std::vector<OscilloscopeChannel::CouplingType> GetAvailableCouplings(size_t i) override;
+	virtual double GetChannelAttenuation(size_t i) override;
+	virtual void SetChannelAttenuation(size_t i, double atten) override;
+	virtual unsigned int GetChannelBandwidthLimit(size_t i) override;
+	virtual void SetChannelBandwidthLimit(size_t i, unsigned int limit_mhz) override;
+	virtual float GetChannelVoltageRange(size_t i, size_t stream) override;
+	virtual void SetChannelVoltageRange(size_t i, size_t stream, float range) override;
+	virtual float GetChannelOffset(size_t i, size_t stream) override;
+	virtual void SetChannelOffset(size_t i, size_t stream, float offset) override;
+
+	//Timebase
+	virtual std::set<InterleaveConflict> GetInterleaveConflicts() override;
+	virtual std::vector<uint64_t> GetSampleRatesInterleaved() override;
+	virtual std::vector<uint64_t> GetSampleDepthsInterleaved() override;
+	virtual void SetTriggerOffset(int64_t offset) override;
+	virtual int64_t GetTriggerOffset() override;
+	virtual bool IsInterleaving() override;
+	virtual bool SetInterleaving(bool combine) override;
+	virtual std::vector<uint64_t> GetSampleRatesNonInterleaved() override;
+	virtual uint64_t GetSampleRate() override;
+	virtual void SetSampleRate(uint64_t rate) override;
+
+	virtual bool HasFrequencyControls() override;
+	virtual bool HasTimebaseControls() override;
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// RX gain control
+	//
+	// Drivers that support gain control override all of these. The defaults describe a radio with no gain control.
+
+	/**
+		@brief Returns true if the receive path of channel i has a configurable gain
+	 */
+	virtual bool HasGainControl(size_t i);
+
+	/**
+		@brief Gets the available gain control modes (for example "manual", "slow_attack")
+
+		If this has zero or one entries, there is no choice of mode and the gain is always adjustable.
+	 */
+	virtual std::vector<std::string> GetGainModes(size_t i);
+
+	///@brief Gets the current gain control mode
+	virtual std::string GetGainMode(size_t i);
+
+	///@brief Sets the gain control mode
+	virtual void SetGainMode(size_t i, const std::string& mode);
+
+	/**
+		@brief Returns true if the gain can be set manually in the current gain control mode
+
+		This is false if the radio is running automatic gain control.
+	 */
+	virtual bool IsGainAdjustable(size_t i);
+
+	///@brief Gets the range of allowed gain values, in dB, as (min, max)
+	virtual std::pair<float, float> GetGainRange(size_t i);
+
+	///@brief Gets the gain, in dB
+	virtual float GetGain(size_t i);
+
+	///@brief Sets the gain, in dB
+	virtual void SetGain(size_t i, float gain);
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Level correction
+	//
+	// Drivers that scale their samples to the signal level at the input (with the receive gain taken out) override
+	// HasLevelCorrection(), and use GetInputGain() to find out how much gain to take out. The rest is handled here,
+	// and is entirely client side.
+	//
+	// The gain from the input to the samples is the receive gain, plus the external gain (for example -20 dB for a pad
+	// in front of the input, so the level is the one at the input of the pad), plus the gain from the calibration file
+	// at the LO frequency.
+
+	///@brief Returns true if the driver corrects the level of channel i for the gain in front of the samples
+	virtual bool HasLevelCorrection(size_t i);
+
+	///@brief Gets the gain of whatever is in front of the input of channel i (negative for attenuation), in dB
+	float GetExternalGain(size_t i);
+
+	/**
+		@brief Sets the gain of whatever is in front of the input of channel i, in dB
+
+		The vertical range and offset are scaled to match, so the waveform looks the same as before.
+	 */
+	void SetExternalGain(size_t i, float gain);
+
+	/**
+		@brief Gets the calibration of channel i as it was set: the path of the file, the calibration itself as JSON,
+		or an empty string if there isn't one
+	 */
+	std::string GetCalibrationFile(size_t i);
+
+	/**
+		@brief Loads the calibration file of channel i
+
+		The file is a list of frequency and gain in dB, the gain being how much higher the level would read than it
+		should with no calibration and zero receive gain. It's either text, one point per line (frequency in Hz,
+		optionally with an SI prefix and/or unit, then the gain, separated by commas, semicolons, tabs, or spaces, with
+		# starting comments), a Touchstone file with two or more ports (S21 is the gain), or JSON (a .json file).
+
+		JSON is an array of points, each either [frequency, gain] or {"freq": frequency, "gain": gain} ("frequency"
+		works too), or an object with that array under "points". Frequencies and gains are numbers, or strings which
+		may have a unit like the text format. Instead of a path, the JSON itself can be passed (see
+		IsCalibrationJson()), so calibration can be pasted in without a file.
+
+		The gain is interpolated linearly between points, and is the same as the nearest point outside of them.
+
+		@param i		Channel number
+		@param path		Path of the file, JSON calibration data, or an empty string for no calibration
+
+		@return			True if the file was loaded. If it couldn't be, there is no calibration, and
+						GetCalibrationError() says why.
+	 */
+	bool SetCalibrationFile(size_t i, const std::string& path);
+
+	///@brief Gets the reason the calibration file of channel i couldn't be loaded, or an empty string if it was
+	std::string GetCalibrationError(size_t i);
+
+	///@brief Checks if a calibration passed to SetCalibrationFile() is JSON data rather than a path (starts with { or [)
+	static bool IsCalibrationJson(const std::string& cal);
+
+	///@brief Gets the gain from the calibration file of channel i at a frequency, in dB (zero if there's no file)
+	float GetCalibrationGain(size_t i, int64_t freq);
+
+	/**
+		@brief Gets the gain from the input of channel i to the samples, in dB
+
+		@param i		Channel number
+		@param freq		LO frequency, in Hz
+		@param rxGain	Receive gain of the radio, in dB
+	 */
+	float GetInputGain(size_t i, int64_t freq, float rxGain);
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Received signal strength
+	//
+	// Drivers for radios that can measure RSSI override these. The defaults describe a radio that can't.
+	//
+	// Reading the RSSI can take a round trip to the radio, so it's only read while enabled. When it is, the driver
+	// updates the "rssi" scalar stream of the channel on every acquisition. When it isn't, the stream is NaN.
+
+	///@brief Returns true if the radio can measure the received signal strength of channel i
+	virtual bool HasRSSI(size_t i);
+
+	///@brief Returns true if the RSSI of channel i is read on every acquisition
+	virtual bool IsRSSIEnabled(size_t i);
+
+	///@brief Enables or disables reading the RSSI of channel i on every acquisition
+	virtual void SetRSSIEnabled(size_t i, bool enable);
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Sweeping
+	//
+	// Drivers for radios that can sweep their LO across a span wider than one capture override these. The defaults
+	// describe a radio that can't.
+
+	///@brief Returns true if the radio can sweep spans wider than it can capture at once
+	virtual bool CanSweep();
+
+	/**
+		@brief Returns true if sweeping is enabled
+
+		When it is, spans wider than one capture are swept. When it isn't, the span is limited to what can be
+		captured at once.
+	 */
+	virtual bool IsSweepEnabled();
+
+	///@brief Enables or disables sweeping
+	virtual void SetSweepEnabled(bool enable);
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Transmit control
+	//
+	// Drivers for radios that can transmit override these. The defaults describe a receive-only radio.
+	//
+	// The transmit paths are SDRTransmitChannel objects at the end of the channel list. They are numbered separately
+	// from the channels (the first transmit path is transmit index 0 whatever its channel index is).
+	//
+	// Each transmit path can generate a small number of tones (for example with a DDS core in the FPGA), which are
+	// complex sinusoids at a frequency relative to the transmit local oscillator.
+
+	///@brief Gets the number of transmit paths
+	virtual size_t GetTxChannelCount();
+
+	///@brief Gets the number of tones each transmit path can generate
+	virtual size_t GetTxToneCount(size_t tx);
+
+	///@brief Gets the local oscillator frequency shared by the transmit paths, in Hz
+	virtual int64_t GetTxLOFrequency();
+
+	///@brief Sets the local oscillator frequency shared by the transmit paths, in Hz
+	virtual void SetTxLOFrequency(int64_t freq);
+
+	///@brief Gets the range of allowed transmit local oscillator frequencies, in Hz, as (min, max)
+	virtual std::pair<int64_t, int64_t> GetTxLOFrequencyRange();
+
+	///@brief Gets the frequency of a tone relative to the transmit LO, in Hz. Negative is below the LO.
+	virtual int64_t GetTxToneFrequency(size_t tx, size_t tone);
+
+	///@brief Sets the frequency of a tone relative to the transmit LO, in Hz
+	virtual void SetTxToneFrequency(size_t tx, size_t tone, int64_t freq);
+
+	///@brief Gets the range of allowed tone frequencies, in Hz, as (min, max)
+	virtual std::pair<int64_t, int64_t> GetTxToneFrequencyRange(size_t tx);
+
+	///@brief Gets the attenuation of a transmit path, in dB. This is positive, more attenuation means less output power.
+	virtual float GetTxAttenuation(size_t tx);
+
+	///@brief Sets the attenuation of a transmit path, in dB
+	virtual void SetTxAttenuation(size_t tx, float atten);
+
+	///@brief Gets the range of allowed transmit attenuation values, in dB, as (min, max)
+	virtual std::pair<float, float> GetTxAttenuationRange(size_t tx);
+
+	///@brief Gets the amplitude of a tone, as a fraction of full scale (0 to 1)
+	virtual float GetTxToneAmplitude(size_t tx, size_t tone);
+
+	///@brief Sets the amplitude of a tone, as a fraction of full scale (0 to 1)
+	virtual void SetTxToneAmplitude(size_t tx, size_t tone, float amplitude);
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Configuration storage
+
+protected:
+	/**
+		@brief Serializes this SDR's configuration to a YAML node.
+	 */
+	//This is called by Instrument::m_serializers and is not virtual
+	//cppcheck-suppress duplInheritedMember
+	void DoSerializeConfiguration(YAML::Node& node, IDTable& table);
+
+	/**
+		@brief Load instrument and channel configuration from a save file
+	 */
+	//This is called by Instrument::m_loaders and is not virtual
+	//cppcheck-suppress duplInheritedMember
+	void DoLoadConfiguration(int version, const YAML::Node& node, IDTable& idmap);
+
+	/**
+		@brief Validate instrument and channel configuration from a save file
+	 */
+	//This is called by Instrument::m_preloaders and is not virtual
+	//cppcheck-suppress duplInheritedMember
+	void DoPreLoadConfiguration(int version, const YAML::Node& node, IDTable& idmap, ConfigWarningList& list);
+
+protected:
+	std::map<std::pair<size_t, size_t>, float> m_channelVoltageRange;
+	std::map<std::pair<size_t, size_t>, float> m_channelOffset;
+
+	///@brief Level correction settings of one channel
+	struct LevelCorrection
+	{
+		LevelCorrection()
+		: m_externalGain(0)
+		{}
+
+		///@brief Gain in front of the input, in dB
+		float m_externalGain;
+
+		///@brief Path of the calibration file
+		std::string m_calFile;
+
+		///@brief Why the calibration file couldn't be loaded (empty if it was)
+		std::string m_calError;
+
+		///@brief Calibration points as (frequency in Hz, gain in dB), sorted by frequency
+		std::vector<std::pair<double, float> > m_calPoints;
+	};
+
+	///@brief Level correction settings, indexed by channel. Protected by m_cacheMutex
+	std::map<size_t, LevelCorrection> m_levelCorrection;
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Dynamic creation
+public:
+	typedef std::shared_ptr<SCPISDR> (*SDRCreateProcType)(SCPITransport*);
+	static void DoAddDriverClass(const std::string& name, SDRCreateProcType proc);
+
+	//This is intentionally not virtual since it's a static method used by enumeration
+	//cppcheck-suppress duplInheritedMember
+	static void EnumDrivers(std::vector<std::string>& names);
+
+	static std::shared_ptr<SCPISDR> CreateSDR(const std::string& driver, SCPITransport* transport);
+
+	//Class enumeration
+	typedef std::map< std::string, SDRCreateProcType > SDRCreateMapType;
+	static SDRCreateMapType m_sdrcreateprocs;
+};
+
+#define SDR_INITPROC(T) \
+	static std::shared_ptr<SCPISDR> CreateInstance(SCPITransport* transport) \
+	{	return std::make_shared<T>(transport); } \
+	virtual std::string GetDriverName() const override \
+	{ return GetDriverNameInternal(); }
+
+#define AddSDRDriverClass(T) SCPISDR::DoAddDriverClass(T::GetDriverNameInternal(), T::CreateInstance); SCPIInstrument::DoAddDriverClass(T::GetDriverNameInternal(), T::GetDriverSupportedModels)
+
+#endif
