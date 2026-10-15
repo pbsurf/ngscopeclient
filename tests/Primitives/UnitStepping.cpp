@@ -30,7 +30,7 @@
 /**
 	@file
 	@author ngscopeclient contributors
-	@brief Unit tests for stepping digits of numeric text (Unit::StepNumericText)
+	@brief Unit tests for stepping digits of numeric text (StepNumericText)
  */
 #ifdef _CATCH2_V3
 #include <catch2/catch_all.hpp>
@@ -39,6 +39,7 @@
 #endif
 
 #include "../../lib/scopehal/scopehal.h"
+#include "../../lib/scopehal/NumericText.h"
 #include "Primitives.h"
 
 using namespace std;
@@ -57,7 +58,7 @@ static void CheckStep(const string& in, bool up, const string& expected)
 	string out;
 	int outCursor;
 	INFO("input " << in << (up ? " up" : " down"));
-	REQUIRE(Unit::StepNumericText(text, cursor, up, out, outCursor));
+	REQUIRE(StepNumericText(text, cursor, up, out, outCursor));
 	out.insert(outCursor, "|");
 	REQUIRE(out == expected);
 }
@@ -71,7 +72,7 @@ static void CheckNoStep(const string& in)
 	string out = "unchanged";
 	int outCursor = 1234;
 	INFO("input " << in);
-	REQUIRE(!Unit::StepNumericText(text, cursor, true, out, outCursor));
+	REQUIRE(!StepNumericText(text, cursor, true, out, outCursor));
 	REQUIRE(out == "unchanged");
 	REQUIRE(outCursor == 1234);
 }
@@ -139,7 +140,7 @@ TEST_CASE("Unit_StepNumericText_CursorAfterNumber")
 	{
 		string out;
 		int outCursor;
-		REQUIRE(Unit::StepNumericText(text, cursor, true, out, outCursor));
+		REQUIRE(StepNumericText(text, cursor, true, out, outCursor));
 		text = out;
 		cursor = outCursor;
 	}
@@ -149,7 +150,7 @@ TEST_CASE("Unit_StepNumericText_CursorAfterNumber")
 	{
 		string out;
 		int outCursor;
-		REQUIRE(Unit::StepNumericText(text, cursor, false, out, outCursor));
+		REQUIRE(StepNumericText(text, cursor, false, out, outCursor));
 		text = out;
 		cursor = outCursor;
 	}
@@ -253,7 +254,7 @@ TEST_CASE("Unit_StepNumericText_RepeatedSteps")
 	{
 		string out;
 		int outCursor;
-		REQUIRE(Unit::StepNumericText(text, cursor, true, out, outCursor));
+		REQUIRE(StepNumericText(text, cursor, true, out, outCursor));
 		text = out;
 		cursor = outCursor;
 	}
@@ -268,7 +269,7 @@ TEST_CASE("Unit_StepNumericText_RepeatedSteps")
 	{
 		string out;
 		int outCursor;
-		REQUIRE(Unit::StepNumericText(text, cursor, false, out, outCursor));
+		REQUIRE(StepNumericText(text, cursor, false, out, outCursor));
 		text = out;
 		cursor = outCursor;
 	}
@@ -311,7 +312,7 @@ static void CheckReformat(Unit unit, const string& in, double value, const strin
 	string out;
 	int outCursor;
 	INFO("input " << in << " value " << value);
-	REQUIRE(unit.ReformatLikeText(value, text, cursor, out, outCursor));
+	REQUIRE(ReformatLikeText(unit, value, text, cursor, out, outCursor));
 	out.insert(outCursor, "|");
 	REQUIRE(out == expected);
 }
@@ -345,9 +346,9 @@ TEST_CASE("Unit_ReformatLikeText")
 	//The result parses to the value
 	string out;
 	int outCursor;
-	REQUIRE(hz.ReformatLikeText(200e3, "1 MHz", 1, out, outCursor));
+	REQUIRE(ReformatLikeText(hz, 200e3, "1 MHz", 1, out, outCursor));
 	REQUIRE(fabs(hz.ParseString(out) - 200e3) < 1e-6);
 
 	//No number to format like
-	REQUIRE(!hz.ReformatLikeText(1e6, "Auto", 0, out, outCursor));
+	REQUIRE(!ReformatLikeText(hz, 1e6, "Auto", 0, out, outCursor));
 }

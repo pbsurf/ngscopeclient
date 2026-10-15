@@ -33,6 +33,7 @@
 	@brief Implementation of Session
  */
 #include "ngscopeclient.h"
+#include "OscilloscopeState.h"
 #include "ngscopeclient-version.h"
 #include "Session.h"
 #include "SessionStorage.h"

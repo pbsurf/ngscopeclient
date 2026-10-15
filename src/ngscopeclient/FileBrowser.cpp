@@ -33,6 +33,7 @@
 	@brief Implementation of FileBrowser
  */
 #include "ngscopeclient.h"
+#include <SDL.h>
 #include "FileBrowser.h"
 #include "MainWindow.h"
 #include "IGFDFileBrowser.h"

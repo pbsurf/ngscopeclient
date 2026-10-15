@@ -34,6 +34,7 @@
  */
 
 #include "ngscopeclient.h"
+#include <SDL.h>
 #include "TextureManager.h"
 
 using namespace std;

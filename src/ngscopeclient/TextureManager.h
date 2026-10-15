@@ -36,6 +36,7 @@
 #define TextureManager_h
 
 class TextureManager;
+struct SDL_Surface;
 
 #include <png.h>
 

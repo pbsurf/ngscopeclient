@@ -31,8 +31,6 @@
 
 #include "../scopehal/scopehal.h"
 
-#include <SDL.h>
-#include <SDL_vulkan.h>
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -43,7 +41,6 @@
 
 #include <atomic>
 
-#include "OscilloscopeState.h"
 #include "BERTState.h"
 #include "PowerSupplyState.h"
 #include "FunctionGeneratorState.h"
@@ -53,26 +50,9 @@
 #include "Event.h"
 
 class Session;
+class OscilloscopeState;
 
-/**
-	@brief Wakes up the main thread's event loop from any thread, so that it renders a frame
-
-	In power-saving (event driven) mode the main loop sleeps until an input event arrives or the polling timeout
-	expires. Background threads that have something new to show (e.g. a waveform) should call this after making it
-	available, so the display doesn't wait for the timeout or for the user to move the mouse.
-
-	Does nothing if a wake-up is already pending.
- */
-inline void WakeMainLoop()
-{
-	if(SDL_HasEvent(SDL_USEREVENT))
-		return;
-
-	SDL_Event wake;
-	memset(&wake, 0, sizeof(wake));
-	wake.type = SDL_USEREVENT;
-	SDL_PushEvent(&wake);
-}
+void WakeMainLoop();
 
 class InstrumentThreadArgs
 {

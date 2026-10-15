@@ -37,6 +37,8 @@
 
 class Texture;
 
+struct SDL_Window;
+
 /**
 	@brief An SDL window containing a Vulkan surface
  */

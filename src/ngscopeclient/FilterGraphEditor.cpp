@@ -33,6 +33,7 @@
 	@brief Implementation of FilterGraphEditor
  */
 #include "ngscopeclient.h"
+#include <SDL.h>
 #include "FilterGraphEditor.h"
 #include "MainWindow.h"
 #include "BERTInputChannelDialog.h"

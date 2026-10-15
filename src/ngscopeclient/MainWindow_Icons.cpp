@@ -34,6 +34,7 @@
  */
 
 #include "ngscopeclient.h"
+#include <SDL.h>
 #include "MainWindow.h"
 
 //Pull in a bunch of filters we have special icons for

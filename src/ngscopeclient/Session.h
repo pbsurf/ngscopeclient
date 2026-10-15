@@ -44,6 +44,7 @@ class WaveformArea;
 class DisplayedChannel;
 class SessionReader;
 class SessionWriter;
+class OscilloscopeState;
 
 #include "../xptools/HzClock.h"
 #include "HistoryManager.h"

@@ -34,6 +34,7 @@
  */
 
 #include "ngscopeclient.h"
+#include <SDL.h>
 #include "MetricsDialog.h"
 #include "Session.h"
 #include "MainWindow.h"

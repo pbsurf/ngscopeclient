@@ -33,6 +33,7 @@
 	@brief Implementation of ScopeThread
  */
 #include "ngscopeclient.h"
+#include "OscilloscopeState.h"
 #include "pthread_compat.h"
 #include "Session.h"
 #include "LoadChannel.h"

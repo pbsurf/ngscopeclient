@@ -34,6 +34,7 @@
  */
 
 #include "ngscopeclient.h"
+#include "OscilloscopeState.h"
 #include "StreamBrowserDialog.h"
 #include "MainWindow.h"
 #include "../scopehal/VIOOutputChannel.h"

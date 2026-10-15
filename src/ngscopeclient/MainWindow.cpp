@@ -33,6 +33,7 @@
 	@brief Implementation of most of MainWindow
  */
 #include "ngscopeclient.h"
+#include <SDL.h>
 #include "ngscopeclient-version.h"
 #include "MainWindow.h"
 #include "SessionStorage.h"

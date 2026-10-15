@@ -36,6 +36,7 @@
 #include "Dialog.h"
 #include "MainWindow.h"
 #include "PreferenceTypes.h"
+#include "../scopehal/NumericText.h"
 
 using namespace std;
 
@@ -361,7 +362,7 @@ bool Dialog::TextMatchesValue(const string& text, double value, Unit unit)
 {
 	string stepped;
 	int cursor;
-	if(!Unit::StepNumericText(text, NumberEnd(text), true, stepped, cursor))
+	if(!StepNumericText(text, NumberEnd(text), true, stepped, cursor))
 		return false;
 
 	double typed = unit.ParseString(text);
@@ -406,7 +407,7 @@ static void ReplaceNumericText(ImGuiInputTextCallbackData* data, NumericStepData
 	string boxText(data->Buf, data->BufTextLen);
 	string newText;
 	int cursor;
-	if(step->unit->ReformatLikeText(step->replaceValue, boxText, data->CursorPos, newText, cursor))
+	if(ReformatLikeText(*step->unit, step->replaceValue, boxText, data->CursorPos, newText, cursor))
 		*step->replaceText = newText;
 	else
 		cursor = min(data->CursorPos, NumberEnd(*step->replaceText));
@@ -482,7 +483,7 @@ static int NumericStepCallback(ImGuiInputTextCallbackData* data)
 		{
 			string once;
 			int onceCursor;
-			if(Unit::StepNumericText(limit.requestedText, limit.requestedCursor, up, once, onceCursor))
+			if(StepNumericText(limit.requestedText, limit.requestedCursor, up, once, onceCursor))
 			{
 				double digit = fabs(step->unit->ParseString(once) - requested);
 				if(digit > 0)
@@ -497,7 +498,7 @@ static int NumericStepCallback(ImGuiInputTextCallbackData* data)
 					else
 					{
 						double value = requested + (up ? n : -n) * digit;
-						ok = step->unit->ReformatLikeText(
+						ok = ReformatLikeText(*step->unit,
 							value, limit.requestedText, limit.requestedCursor, newText, newCursor);
 					}
 				}
@@ -513,7 +514,7 @@ static int NumericStepCallback(ImGuiInputTextCallbackData* data)
 	}
 
 	if(!ok)
-		ok = Unit::StepNumericText(text, data->CursorPos, up, newText, newCursor);
+		ok = StepNumericText(text, data->CursorPos, up, newText, newCursor);
 	if(ok)
 	{
 		data->DeleteChars(0, data->BufTextLen);

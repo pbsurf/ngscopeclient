@@ -39,6 +39,7 @@
 
 class FileBrowser;
 class SCPISDR;
+class OscilloscopeState;
 
 class ChannelPropertiesDialog : public BaseChannelPropertiesDialog
 {

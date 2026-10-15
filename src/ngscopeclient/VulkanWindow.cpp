@@ -34,6 +34,8 @@
  */
 
 #include "ngscopeclient.h"
+#include <SDL.h>
+#include <SDL_vulkan.h>
 #include "TextureManager.h"
 #include "VulkanWindow.h"
 #include "VulkanFFTPlan.h"

@@ -34,6 +34,7 @@
  */
 
 #include "ngscopeclient.h"
+#include "OscilloscopeState.h"
 #include "MainWindow.h"
 #include "ChannelPropertiesDialog.h"
 #include "FileBrowser.h"
