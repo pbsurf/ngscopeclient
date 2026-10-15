@@ -970,7 +970,9 @@ protected:
 		auto ret = dynamic_cast<UniformAnalogWaveform*>(p);
 		if(ret)
 		{
+			//Flags (like clipping) were for the last capture this was used for, not the next one
 			ret->Rename(name);
+			ret->m_flags = 0;
 			return ret;
 		}
 
@@ -988,7 +990,9 @@ protected:
 		auto ret = dynamic_cast<SparseDigitalWaveform*>(p);
 		if(ret)
 		{
+			//Flags (like clipping) were for the last capture this was used for, not the next one
 			ret->Rename(name);
+			ret->m_flags = 0;
 			return ret;
 		}
 
