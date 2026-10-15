@@ -1,0 +1,2 @@
+# cmd.exe needs CRLF line endings, whatever the core.autocrlf setting of the clone
+*.bat text eol=crlf

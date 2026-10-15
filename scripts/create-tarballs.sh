@@ -9,7 +9,7 @@ export TZ=UTC0
 export LANG=C
 
 location="$(dirname -- "$( readlink -f -- "$0"; )";)"
-cd "$location"
+cd "$location/.."
 
 export NGSCOPECLIENT_PACKAGE_VERSION="$(git describe --always --tags)"
 export NGSCOPECLIENT_PACKAGE_VERSION_LONG="$(git describe --always --tags --long)"

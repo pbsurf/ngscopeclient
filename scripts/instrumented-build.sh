@@ -27,7 +27,7 @@
 # eyeballing across many cycles.
 #
 # Usage:
-#   ./instrumented-build.sh ["short label describing what you just changed"]
+#   scripts/instrumented-build.sh ["short label describing what you just changed"]
 #
 # Env overrides:
 #   BUILD_DIR=/path/to/build   (default: ./build)
@@ -38,7 +38,7 @@
 
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build}"
 LOG_ROOT="$REPO_ROOT/build-logs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
