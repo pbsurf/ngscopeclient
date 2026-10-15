@@ -3020,6 +3020,7 @@ bool MainWindow::LoadUIConfiguration(int version, const YAML::Node& node)
 		{
 			m_pendingWidth = window["width"].as<int>();
 			m_pendingHeight = window["height"].as<int>();
+			m_pendingMaximized = window["maximized"].as<bool>(false);
 			m_softwareResizeRequested = true;
 		}
 
@@ -3703,6 +3704,7 @@ YAML::Node MainWindow::SerializeUIConfiguration()
 	window["height"] = m_height;
 	window["width"] = m_width;
 	window["fullscreen"] = m_fullscreen;
+	window["maximized"] = (SDL_GetWindowFlags(m_window) & SDL_WINDOW_MAXIMIZED) != 0;
 	window["traceAlpha"] = m_traceAlpha;
 	window["persistenceDecay"] = m_persistenceDecay;
 	node["window"] = window;

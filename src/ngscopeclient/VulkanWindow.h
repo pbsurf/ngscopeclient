@@ -144,6 +144,9 @@ protected:
 	///@brief Requested height for software resize
 	int m_pendingHeight;
 
+	///@brief True to maximize instead of resizing to m_pendingWidth / m_pendingHeight
+	bool m_pendingMaximized;
+
 	///@brief Frame command pool
 	std::unique_ptr<vk::raii::CommandPool> m_cmdPool;
 

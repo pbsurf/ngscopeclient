@@ -68,6 +68,7 @@ VulkanWindow::VulkanWindow(const string& title, shared_ptr<QueueHandle> queue, b
 	, m_softwareResizeRequested(false)
 	, m_pendingWidth(0)
 	, m_pendingHeight(0)
+	, m_pendingMaximized(false)
 	, m_semaphoreIndex(0)
 	, m_frameIndex(0)
 	, m_lastFrameIndex(0)
@@ -618,7 +619,15 @@ void VulkanWindow::Render()
 		//waitIdle is exclusive with all other operations
 		lock_guard<shared_mutex> lock(g_vulkanActivityMutex);
 		g_vkComputeDevice->waitIdle();
-		SDL_SetWindowSize(m_window, m_pendingWidth, m_pendingHeight);
+		if(m_pendingMaximized)
+			SDL_MaximizeWindow(m_window);
+		else
+		{
+			//A maximized window has to be restored before it can be resized
+			if(SDL_GetWindowFlags(m_window) & SDL_WINDOW_MAXIMIZED)
+				SDL_RestoreWindow(m_window);
+			SDL_SetWindowSize(m_window, m_pendingWidth, m_pendingHeight);
+		}
 		return;
 	}
 
