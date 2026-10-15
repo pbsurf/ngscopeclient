@@ -87,7 +87,7 @@ public:
 		size_t depth,
 		size_t kernelBuffers,
 		size_t discard,
-		std::vector<std::vector<int16_t> >& data) override;
+		const std::function<void(const IIOSampleBlock&)>& consume) override;
 	virtual void StopCapture() override;
 
 protected:
@@ -116,6 +116,12 @@ protected:
 
 	///@brief Channels enabled for m_rxBuf, in the same order as m_rxChannelNames
 	std::vector<iio_channel*> m_rxChannels;
+
+	///@brief True if the samples in m_rxBuf can be used where they are, without converting them to host format
+	bool m_rxRaw;
+
+	///@brief Samples converted to host format, one vector per channel, if they can't be used where they are
+	std::vector<std::vector<int16_t> > m_rxConverted;
 };
 
 #endif

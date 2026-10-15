@@ -547,7 +547,7 @@ bool IIOMockContext::CaptureBlock(
 	size_t depth,
 	size_t /*kernelBuffers*/,
 	size_t /*discard*/,
-	vector<vector<int16_t> >& data)
+	const function<void(const IIOSampleBlock&)>& consume)
 {
 	if(dev != g_rxData)
 	{
@@ -689,8 +689,9 @@ bool IIOMockContext::CaptureBlock(
 		noiseCounts.push_back(sqrt(thermal*thermal + g_adcNoiseCounts*g_adcNoiseCounts));
 	}
 
-	data.clear();
-	data.resize(channels.size());
+	//Interleave the channels like a real buffer does
+	size_t nchans = channels.size();
+	vector<int16_t> samples(depth * nchans);
 	const double twoPi = 2 * M_PI;
 	for(size_t i=0; i<channels.size(); i++)
 	{
@@ -707,16 +708,22 @@ bool IIOMockContext::CaptureBlock(
 
 		//Clip at full scale like the ADC does
 		normal_distribution<double> noise(0, noiseCounts[path[i]]);
-		auto& out = data[i];
-		out.resize(depth);
 		lock_guard<recursive_mutex> lock(m_mutex);
 		for(size_t j=0; j<depth; j++)
 		{
 			double v = acc[j] + noise(m_rng);
-			out[j] = static_cast<int16_t>(min(g_adcFullScale - 1, max(-g_adcFullScale, round(v))));
+			samples[j*nchans + i] = static_cast<int16_t>(min(g_adcFullScale - 1, max(-g_adcFullScale, round(v))));
 		}
 	}
 
+	IIOSampleBlock block;
+	block.depth = depth;
+	block.step = nchans;
+	for(size_t i=0; i<nchans; i++)
+		block.first.push_back(samples.data() + i);
+
+	lock_guard<recursive_mutex> lock(m_mutex);
+	consume(block);
 	return true;
 }
 

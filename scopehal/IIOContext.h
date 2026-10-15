@@ -39,6 +39,28 @@
 #ifndef IIOContext_h
 #define IIOContext_h
 
+#include <functional>
+
+/**
+	@brief Samples of a block captured by IIOContext::CaptureBlock(), where they were captured to
+
+	The samples are 16 bit, host endian, and sign extended, so for a 12 bit ADC they range from -2048 to 2047. Sample i
+	of channel c is first[c][i * step].
+
+	@ingroup sdrdrivers
+ */
+struct IIOSampleBlock
+{
+	///@brief Number of samples of each channel
+	size_t depth;
+
+	///@brief Distance from one sample of a channel to the next, in samples (the same for every channel)
+	size_t step;
+
+	///@brief First sample of each channel, in the same order as the channels were asked for
+	std::vector<const int16_t*> first;
+};
+
 /**
 	@brief Backend-independent view of an IIO (Industrial I/O) context
 
@@ -126,9 +148,18 @@ public:
 		@param depth			Number of samples to capture from each channel
 		@param kernelBuffers	Number of blocks the kernel can queue up. More let the device keep capturing while
 								we're busy, fewer means less to throw away when the samples go out of date.
+		The samples are handed to consume where they were captured to, usually interleaved in the buffer the device
+		captured into, rather than being copied out of it channel by channel (which is slow). That buffer is reused for
+		the next block, so consume has to be done with them by the time it returns. It's called with the context
+		locked, from the thread that called CaptureBlock(), and only if the capture succeeded.
+
+		@param dev				Device to capture from (e.g. cf-ad9361-lpc)
+		@param channels			Channel IDs to capture (e.g. voltage0, voltage1). All must be 16 bit input channels.
+		@param depth			Number of samples to capture from each channel
+		@param kernelBuffers	Number of blocks the kernel can queue up. More let the device keep capturing while
+								we're busy, fewer means less to throw away when the samples go out of date.
 		@param discard			Number of blocks to read and throw away first, if the buffer was already open
-		@param data				Output samples, one vector per channel in the same order as channels. These are
-								converted to host format, so for a 12 bit ADC they range from -2048 to 2047.
+		@param consume			Called with the samples
 
 		@return					True on success, false on failure (details are logged)
 	 */
@@ -138,7 +169,7 @@ public:
 		size_t depth,
 		size_t kernelBuffers,
 		size_t discard,
-		std::vector<std::vector<int16_t> >& data) =0;
+		const std::function<void(const IIOSampleBlock&)>& consume) =0;
 
 	///@brief Closes the buffer CaptureBlock() keeps open, if there is one, so the device stops capturing
 	virtual void StopCapture() =0;

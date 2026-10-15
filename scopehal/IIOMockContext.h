@@ -105,7 +105,7 @@ public:
 		size_t depth,
 		size_t kernelBuffers,
 		size_t discard,
-		std::vector<std::vector<int16_t> >& data) override;
+		const std::function<void(const IIOSampleBlock&)>& consume) override;
 	virtual void StopCapture() override;
 
 protected:

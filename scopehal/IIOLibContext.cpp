@@ -51,6 +51,7 @@ IIOLibContext::IIOLibContext(const string& uri, iio_context* ctx)
 	, m_rxBuf(nullptr)
 	, m_rxDepth(0)
 	, m_rxKernelBuffers(0)
+	, m_rxRaw(false)
 {
 }
 
@@ -296,7 +297,7 @@ bool IIOLibContext::CaptureBlock(
 	size_t depth,
 	size_t kernelBuffers,
 	size_t discard,
-	vector<vector<int16_t> >& data)
+	const function<void(const IIOSampleBlock&)>& consume)
 {
 	lock_guard<recursive_mutex> lock(m_mutex);
 
@@ -324,22 +325,64 @@ bool IIOLibContext::CaptureBlock(
 		}
 	}
 
-	data.clear();
-	data.resize(m_rxChannels.size());
-	for(size_t i=0; i<m_rxChannels.size(); i++)
+	IIOSampleBlock block;
+	block.depth = depth;
+
+	//Use the samples where they are if we can. Copying them out with iio_channel_read() is a function call per sample.
+	if(m_rxRaw)
 	{
-		data[i].resize(depth);
-		size_t expected = depth * sizeof(int16_t);
-		size_t got = iio_channel_read(m_rxChannels[i], m_rxBuf, data[i].data(), expected);
-		if(got != expected)
+		block.step = iio_buffer_step(m_rxBuf) / sizeof(int16_t);
+		auto start = static_cast<const int16_t*>(iio_buffer_start(m_rxBuf));
+		auto end = static_cast<const int16_t*>(iio_buffer_end(m_rxBuf));
+		size_t got = (block.step > 0) ? (end - start) / block.step : 0;
+		if(got < depth)
 		{
-			LogError("Short read from IIO channel %s/%s (got %zu of %zu bytes)\n",
-				dev.c_str(), channels[i].c_str(), got, expected);
+			LogError("Short read from IIO device %s (got %zu of %zu samples)\n", dev.c_str(), got, depth);
 			return false;
+		}
+		for(auto c : m_rxChannels)
+			block.first.push_back(static_cast<const int16_t*>(iio_buffer_first(m_rxBuf, c)));
+	}
+
+	//Otherwise have libiio convert them to host format
+	else
+	{
+		block.step = 1;
+		m_rxConverted.resize(m_rxChannels.size());
+		for(size_t i=0; i<m_rxChannels.size(); i++)
+		{
+			auto& data = m_rxConverted[i];
+			data.resize(depth);
+			size_t expected = depth * sizeof(int16_t);
+			size_t got = iio_channel_read(m_rxChannels[i], m_rxBuf, data.data(), expected);
+			if(got != expected)
+			{
+				LogError("Short read from IIO channel %s/%s (got %zu of %zu bytes)\n",
+					dev.c_str(), channels[i].c_str(), got, expected);
+				return false;
+			}
+			block.first.push_back(data.data());
 		}
 	}
 
+	consume(block);
 	return true;
+}
+
+/**
+	@brief Checks if samples of a channel can be used as they are in the buffer, without converting them
+
+	That's the case if they're 16 bits, host endian, already sign extended (or the full 16 bits), and not shifted.
+ */
+static bool IsHostFormat(const iio_data_format* fmt)
+{
+	uint16_t one = 1;
+	uint8_t firstByte;
+	memcpy(&firstByte, &one, 1);
+	bool hostIsLittleEndian = (firstByte == 1);
+
+	return (fmt->length == 16) && (fmt->repeat <= 1) && fmt->is_fully_defined && (fmt->shift == 0) &&
+		(fmt->is_be != hostIsLittleEndian);
 }
 
 /**
@@ -409,12 +452,20 @@ bool IIOLibContext::StartCapture(
 		return false;
 	}
 
+	//See if the samples can be used where they are
+	bool raw = true;
+	for(auto c : chans)
+		raw &= IsHostFormat(iio_channel_get_data_format(c));
+	if(!raw)
+		LogDebug("IIO device %s has samples that need converting to host format\n", dev.c_str());
+
 	m_rxBuf = buf;
 	m_rxDevName = dev;
 	m_rxChannelNames = channels;
 	m_rxChannels = chans;
 	m_rxDepth = depth;
 	m_rxKernelBuffers = kernelBuffers;
+	m_rxRaw = raw;
 	return true;
 }
 
@@ -434,6 +485,8 @@ void IIOLibContext::StopCapture()
 	m_rxChannels.clear();
 	m_rxDepth = 0;
 	m_rxKernelBuffers = 0;
+	m_rxRaw = false;
+	m_rxConverted.clear();
 }
 
 #endif

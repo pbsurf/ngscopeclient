@@ -56,6 +56,9 @@ static const size_t g_maxTones = 2;
 //Full scale of the 12 bit ADC (sign extended into 16 bits by libiio)
 static const float g_adcScale = 1.0f / 2048;
 
+//Samples this far from zero (in ADC counts) are taken to be clipped, so either end of the -2048 to +2047 range counts
+static const int g_adcClipCounts = 2047;
+
 //When sweeping, how much of the capture bandwidth we step the LO by unless told otherwise. The rest is overlap between
 //adjacent captures, so that the analog filter rolloff at the edges of each capture isn't used.
 static const double g_defaultSweepStepFraction = 0.5;
@@ -1377,6 +1380,72 @@ Oscilloscope::TriggerMode IIOSDR::PollTrigger()
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Waveform acquisition
 
+/**
+	@brief Converts the I and Q samples of an RX path to floating point, and checks them for clipping
+
+	@param isrc		First I sample, in ADC counts
+	@param qsrc		First Q sample, in ADC counts
+	@param step		Distance from one sample to the next of the same channel, in samples
+	@param depth	Number of samples
+	@param scale	Value of one ADC count
+	@param iout		I output
+	@param qout		Q output
+
+	@return			True if any sample was at full scale
+ */
+static bool ConvertIQ(
+	const int16_t* isrc,
+	const int16_t* qsrc,
+	size_t step,
+	size_t depth,
+	float scale,
+	float* iout,
+	float* qout)
+{
+	//|x| >= g_adcClipCounts exactly when x + g_adcClipCounts - 1 is outside 0 to 2*g_adcClipCounts - 2, which is
+	//one unsigned compare. Doing it without a branch, and with raw pointers, lets the compiler vectorize the loops.
+	const unsigned clipOffset = g_adcClipCounts - 1;
+	const unsigned clipRange = 2 * g_adcClipCounts - 2;
+	unsigned clipping = 0;
+
+	//If I and Q are next to each other with nothing else in between (one RX path), read each pair as a 32 bit word
+	//so the loads are contiguous, which is a few times faster since it vectorizes. I is the low half of the word on a
+	//little endian host.
+	uint16_t one = 1;
+	uint8_t firstByte;
+	memcpy(&firstByte, &one, 1);
+	if( (step == 2) && (qsrc == isrc + 1) && (firstByte == 1) )
+	{
+		for(size_t j=0; j<depth; j++)
+		{
+			uint32_t word;
+			memcpy(&word, isrc + j*2, sizeof(word));
+			int i = static_cast<int16_t>(word & 0xffff);
+			int q = static_cast<int16_t>(word >> 16);
+			iout[j] = i * scale;
+			qout[j] = q * scale;
+			clipping |= (static_cast<unsigned>(i + clipOffset) > clipRange) |
+				(static_cast<unsigned>(q + clipOffset) > clipRange);
+		}
+	}
+
+	//Anything else (two RX paths, samples converted by libiio, etc)
+	else
+	{
+		for(size_t j=0; j<depth; j++)
+		{
+			int i = isrc[j*step];
+			int q = qsrc[j*step];
+			iout[j] = i * scale;
+			qout[j] = q * scale;
+			clipping |= (static_cast<unsigned>(i + clipOffset) > clipRange) |
+				(static_cast<unsigned>(q + clipOffset) > clipRange);
+		}
+	}
+
+	return (clipping != 0);
+}
+
 bool IIOSDR::AcquireData()
 {
 	if(!m_ctx)
@@ -1453,8 +1522,69 @@ bool IIOSDR::AcquireData()
 	int64_t centerFreq = m_hwCenterFreq;
 	int64_t fs_per_sample = FS_PER_SECOND / m_hwSampleRate;
 
-	vector<vector<int16_t> > data;
-	if(!m_ctx->CaptureBlock(g_rxDevice, iioChannels, depth, kernelBuffers, discard, data))
+	//Convert the samples while they're still in the capture buffer.
+	//(AGC moves the gain around by itself, so find out what it was for this capture: read after the capture, like the
+	//RSSI, and only while AGC is running since it's a round trip to the radio)
+	SequenceSet s;
+	auto consume = [&](const IIOSampleBlock& block)
+	{
+		for(size_t n=0; n<paths.size(); n++)
+		{
+			size_t i = paths[n];
+			if(agc[n])
+			{
+				double gain;
+				if(m_ctx->ReadChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), false, "hardwaregain", gain))
+				{
+					m_hwGain[i] = gain;
+
+					lock_guard<recursive_mutex> lock(m_cacheMutex);
+					if(!m_gainDirty[i])
+						m_gain[i] = gain;
+				}
+			}
+
+			//Refer the samples to the input, taking out the gain of the radio and whatever is in front of it
+			float scale = g_adcScale * pow(10, -GetInputGain(i, centerFreq, m_hwGain[i]) / 20);
+
+			string base = m_nickname + "." + GetOscilloscopeChannel(i)->GetHwname();
+			auto icap = AllocateAnalogWaveform(base + ".i");
+			icap->m_timescale = fs_per_sample;
+			icap->m_triggerPhase = 0;
+			icap->m_startTimestamp = floor(now);
+			icap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
+			icap->Resize(depth);
+
+			auto qcap = AllocateAnalogWaveform(base + ".q");
+			qcap->m_timescale = fs_per_sample;
+			qcap->m_triggerPhase = 0;
+			qcap->m_startTimestamp = floor(now);
+			qcap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
+			qcap->Resize(depth);
+
+			icap->PrepareForCpuAccess();
+			qcap->PrepareForCpuAccess();
+			bool clipping = ConvertIQ(
+				block.first[n*2],
+				block.first[n*2 + 1],
+				block.step,
+				depth,
+				scale,
+				icap->m_samples.GetCpuPointer(),
+				qcap->m_samples.GetCpuPointer());
+			icap->MarkSamplesModifiedFromCpu();
+			qcap->MarkSamplesModifiedFromCpu();
+			if(clipping)
+			{
+				icap->m_flags |= WaveformBase::WAVEFORM_CLIPPING;
+				qcap->m_flags |= WaveformBase::WAVEFORM_CLIPPING;
+			}
+
+			s[StreamDescriptor(GetChannel(i), 0)] = icap;
+			s[StreamDescriptor(GetChannel(i), 1)] = qcap;
+		}
+	};
+	if(!m_ctx->CaptureBlock(g_rxDevice, iioChannels, depth, kernelBuffers, discard, consume))
 	{
 		//Don't spin on a failing capture, stop and let the user sort it out
 		LogError("IIO capture failed, stopping acquisition\n");
@@ -1462,60 +1592,10 @@ bool IIOSDR::AcquireData()
 		return false;
 	}
 
-	SequenceSet s;
 	vector<PendingScalars> scalars;
 	for(size_t n=0; n<paths.size(); n++)
 	{
 		size_t i = paths[n];
-		auto& idata = data[n*2];
-		auto& qdata = data[n*2 + 1];
-
-		//AGC moves the gain around by itself, so find out what it was for this capture (read after the capture, like
-		//the RSSI, and only while AGC is running since it's a round trip to the radio)
-		if(agc[n])
-		{
-			double gain;
-			if(m_ctx->ReadChannelAttrDouble(g_phyDevice, "voltage" + to_string(i), false, "hardwaregain", gain))
-			{
-				m_hwGain[i] = gain;
-
-				lock_guard<recursive_mutex> lock(m_cacheMutex);
-				if(!m_gainDirty[i])
-					m_gain[i] = gain;
-			}
-		}
-
-		//Refer the samples to the input, taking out the gain of the radio and whatever is in front of it
-		float scale = g_adcScale * pow(10, -GetInputGain(i, centerFreq, m_hwGain[i]) / 20);
-
-		string base = m_nickname + "." + GetOscilloscopeChannel(i)->GetHwname();
-		auto icap = AllocateAnalogWaveform(base + ".i");
-		icap->m_timescale = fs_per_sample;
-		icap->m_triggerPhase = 0;
-		icap->m_startTimestamp = floor(now);
-		icap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
-		icap->Resize(depth);
-
-		auto qcap = AllocateAnalogWaveform(base + ".q");
-		qcap->m_timescale = fs_per_sample;
-		qcap->m_triggerPhase = 0;
-		qcap->m_startTimestamp = floor(now);
-		qcap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
-		qcap->Resize(depth);
-
-		//Convert to floating point
-		icap->PrepareForCpuAccess();
-		qcap->PrepareForCpuAccess();
-		for(size_t j=0; j<depth; j++)
-		{
-			icap->m_samples[j] = idata[j] * scale;
-			qcap->m_samples[j] = qdata[j] * scale;
-		}
-		icap->MarkSamplesModifiedFromCpu();
-		qcap->MarkSamplesModifiedFromCpu();
-
-		s[StreamDescriptor(GetChannel(i), 0)] = icap;
-		s[StreamDescriptor(GetChannel(i), 1)] = qcap;
 
 		//Read after the capture so it's for the same LO (this is a round trip to the radio, so only if asked for)
 		//The AD9361 RSSI is 0 to -128 dB, referenced to the chip's input with the receive gain taken out (UG-570,
