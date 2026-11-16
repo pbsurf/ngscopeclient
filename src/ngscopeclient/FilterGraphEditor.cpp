@@ -42,6 +42,7 @@
 #include "DigitalIOChannelDialog.h"
 #include "DigitalOutputChannelDialog.h"
 #include "ChannelPropertiesDialog.h"
+#include "SDRTransmitChannelDialog.h"
 #include "FilterPropertiesDialog.h"
 #include "EmbeddedTriggerPropertiesDialog.h"
 #include "MeasurementsDialog.h"
@@ -248,12 +249,15 @@ bool FilterGraphEditor::Render()
 	auto fdlg = dynamic_pointer_cast<FilterPropertiesDialog>(dlg);
 	auto bdlg = dynamic_pointer_cast<BERTInputChannelDialog>(dlg);
 	auto cdlg = dynamic_pointer_cast<ChannelPropertiesDialog>(dlg);
+	auto tdlg = dynamic_pointer_cast<SDRTransmitChannelDialog>(dlg);
 	if(fdlg)
 		fdlg->RunFileDialog();
 	else if(bdlg)
 		bdlg->RunFileDialog();
 	else if(cdlg)
 		cdlg->RunFileDialog();
+	else if(tdlg)
+		tdlg->RunFileDialog();
 
 	//Render our error window
 	m_errorWindow.Render();
@@ -2745,8 +2749,11 @@ void FilterGraphEditor::HandleDoubleClicks()
 	auto doc = dynamic_cast<DigitalOutputChannel*>(node);
 	auto dic = dynamic_cast<DigitalInputChannel*>(node);
 	auto dio = dynamic_cast<DigitalIOChannel*>(node);
+	auto sdrtx = dynamic_cast<SDRTransmitChannel*>(node);
 	if(trig)
 		m_parent->ShowTriggerProperties();
+	else if(sdrtx)
+		m_parent->ShowSdrTxProperties(sdrtx);
 
 	//TODO: check if we already have a dialog for these types and avoid spawning a duplicate
 	else if(bo)
@@ -2794,6 +2801,7 @@ bool FilterGraphEditor::HandleNodeProperties()
 			auto doc = dynamic_cast<DigitalOutputChannel*>(node);
 			auto dic = dynamic_cast<DigitalInputChannel*>(node);
 			auto dio = dynamic_cast<DigitalIOChannel*>(node);
+			auto sdrtx = dynamic_cast<SDRTransmitChannel*>(node);
 
 			//Close the floating dialog, if one exists
 			m_parent->HideChannelProperties(dynamic_cast<InstrumentChannel*>(node));
@@ -2816,6 +2824,8 @@ bool FilterGraphEditor::HandleNodeProperties()
 					m_propertiesDialogs[id] = make_shared<DigitalIOChannelDialog>(dio, m_parent, true);
 				else if(doc)
 					m_propertiesDialogs[id] = make_shared<DigitalOutputChannelDialog>(doc, m_parent, true);
+				else if(sdrtx)
+					m_propertiesDialogs[id] = make_shared<SDRTransmitChannelDialog>(sdrtx, m_parent, true);
 				else if(dic)
 					m_propertiesDialogs[id] = make_shared<DigitalInputChannelDialog>(dic, m_parent, true);
 

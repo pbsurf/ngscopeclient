@@ -891,6 +891,32 @@ void StreamBrowserDialog::renderSdrTxProperties(shared_ptr<SCPISDR> sdr, SDRTran
 			sdr->SetTxToneAmplitude(tx, j, info.m_amplitude);
 		}
 
+		//Level is another view of the gain and amplitude. Rounded so it's stable while the settings are.
+		bool calibrated = sdr->HasTxCalibration(tx);
+		Unit levelUnit(calibrated ? Unit::UNIT_DBM : Unit::UNIT_DB);
+		float level = sdr->GetTxToneLevel(tx, j);
+		if(isfinite(level))
+			level = round(level * 100) / 100;
+		if( (calibrated != info.m_levelCalibrated) || info.m_levelText.empty() ||
+			( (level != info.m_level) && !TextMatchesValue(info.m_levelText, level, levelUnit) ) )
+		{
+			info.m_levelCalibrated = calibrated;
+			info.m_level = level;
+			info.m_levelText = levelUnit.PrettyPrint(level);
+		}
+		string levelHelp = calibrated ?
+			"Level of the tone at the output, from the transmit calibration (in the channel properties).\n\n" :
+			"Level of the tone relative to a full scale tone at 0 dB gain. Load a transmit calibration in the "
+			"channel properties (double click the channel) to have it in dBm.\n\n";
+		levelHelp +=
+			"Setting it changes the amplitude of the tone. The gain changes too if the amplitudes of the tones "
+			"would add up to more than 100% (clipping), or this tone would be below 3%, where it's not accurate; "
+			"the other tones then keep their levels.";
+		if(renderEditableProperty(dwidth, "Level", info.m_levelText, info.m_level, levelUnit, levelHelp.c_str()))
+		{
+			sdr->SetTxToneLevel(tx, j, info.m_level);
+		}
+
 		ImGui::PopID();
 	}
 }
@@ -1797,6 +1823,8 @@ void StreamBrowserDialog::renderChannelNode(
 		{
 			if(scopechan)
 				m_parent->ShowChannelProperties(scopechan);
+			else if(sdrtxchan)
+				m_parent->ShowSdrTxProperties(sdrtxchan);
 			else if(psuchan)
 				m_parent->ShowInstrumentProperties(psu);
 			else
@@ -2000,7 +2028,8 @@ void StreamBrowserDialog::renderChannelNode(
 		}
 		else if(sdr && sdrtxchan)
 		{
-			BeginBlock("sdr_tx_params");
+			if(BeginBlock("sdr_tx_params", true, "Open channel properties"))
+				m_parent->ShowSdrTxProperties(sdrtxchan);
 			renderSdrTxProperties(sdr, sdrtxchan);
 			EndBlock();
 		}

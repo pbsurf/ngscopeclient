@@ -64,6 +64,7 @@
 class MeasurementsDialog;
 class HistoryDialog;
 class FileBrowser;
+class SDRTransmitChannel;
 class CreateFilterBrowser;
 
 class SplitGroupRequest
@@ -196,6 +197,7 @@ public:
 	{ m_splitRequests.push_back(SplitGroupRequest(group, direction, streamGroup, singleArea)); }
 
 	void ShowChannelProperties(OscilloscopeChannel* channel);
+	void ShowSdrTxProperties(SDRTransmitChannel* channel);
 	void HideChannelProperties(InstrumentChannel* channel);
 	void ShowInstrumentProperties(std::shared_ptr<Instrument> instrument);
 	void ShowTriggerProperties();

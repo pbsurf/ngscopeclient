@@ -52,6 +52,7 @@
 #include "BERTDialog.h"
 #include "BERTInputChannelDialog.h"
 #include "ChannelPropertiesDialog.h"
+#include "SDRTransmitChannelDialog.h"
 #include "CreateFilterBrowser.h"
 #include "FileBrowser.h"
 #include "FilterGraphWorkspace.h"
@@ -1339,6 +1340,10 @@ void MainWindow::OnDialogClosed(const std::shared_ptr<Dialog>& dlg)
 	if(chanDlg)
 		m_channelPropertiesDialogs.erase(chanDlg->GetChannel());
 
+	auto txDlg = dynamic_pointer_cast<SDRTransmitChannelDialog>(dlg);
+	if(txDlg)
+		m_channelPropertiesDialogs.erase(txDlg->GetChannel());
+
 	auto protoDlg = dynamic_pointer_cast<ProtocolAnalyzerDialog>(dlg);
 	if(protoDlg)
 	{
@@ -1840,10 +1845,23 @@ void MainWindow::ShowChannelProperties(OscilloscopeChannel* channel)
 	}
 }
 
+/**
+	@brief Shows the properties of a transmit path of an SDR (it isn't an OscilloscopeChannel, so has its own dialog)
+ */
+void MainWindow::ShowSdrTxProperties(SDRTransmitChannel* channel)
+{
+	if(m_channelPropertiesDialogs.find(channel) != m_channelPropertiesDialogs.end())
+		return;
+
+	auto dlg = make_shared<SDRTransmitChannelDialog>(channel, this);
+	m_channelPropertiesDialogs[channel] = dlg;
+	AddDialog(dlg);
+}
+
 void MainWindow::HideChannelProperties(InstrumentChannel* channel)
 {
 	auto it = m_channelPropertiesDialogs.find(channel);
-	if(it->second)
+	if( (it != m_channelPropertiesDialogs.end()) && it->second)
 	{
 		m_dialogs.erase(it->second);
 		m_channelPropertiesDialogs.erase(it->first);

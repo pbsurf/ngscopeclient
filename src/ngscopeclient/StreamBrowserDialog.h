@@ -111,6 +111,8 @@ public:
 	StreamBrowserTxToneInfo()
 		: m_freq(0)
 		, m_amplitude(0)
+		, m_level(0)
+		, m_levelCalibrated(false)
 		, m_valid(false)
 	{}
 
@@ -119,6 +121,13 @@ public:
 
 	std::string m_amplitudeText;
 	float m_amplitude;
+
+	///@brief Level at the output, rounded to 0.01 dB (dBm with a transmit calibration, otherwise dBFS with no gain)
+	std::string m_levelText;
+	float m_level;
+
+	///@brief True if m_levelText was filled in with a transmit calibration (so is in dBm)
+	bool m_levelCalibrated;
 
 	///@brief False until the text has been filled in from the radio
 	bool m_valid;

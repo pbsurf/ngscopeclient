@@ -118,6 +118,7 @@ add_executable(ngscopeclient
 	RFGeneratorDialog.cpp
 	ScopeDeskewWizard.cpp
 	SCPIConsoleDialog.cpp
+	SDRTransmitChannelDialog.cpp
 	Session.cpp
 	SessionStorage.cpp
 	StreamBrowserDialog.cpp
