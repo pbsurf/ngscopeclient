@@ -54,6 +54,21 @@ static const int64_t g_minSampleRateHz = 2083334;
 static const int64_t g_maxSampleRateHz = 61440000;
 static const int64_t g_minBandwidthHz = 200000;
 
+//The crystal, which the RF synthesizers get doubled. This is what the xo_correction attribute reads.
+static const int64_t g_xoHz = 40000000;
+
+//AD936x registers of the RX synth, and the modulus of its fractional word
+static const uint32_t g_regRfpllDividers = 0x005;
+static const uint32_t g_regRxIntegerByte0 = 0x231;
+static const uint32_t g_regRxIntegerByte1 = 0x232;
+static const uint32_t g_regRxFractByte0 = 0x233;
+static const uint32_t g_regRxFractByte1 = 0x234;
+static const uint32_t g_regRxFractByte2 = 0x235;
+static const uint32_t g_regRxVcoLock = 0x247;
+static const uint32_t g_regRefDivideConfig1 = 0x2AB;
+static const uint32_t g_regRefDivideConfig2 = 0x2AC;
+static const double g_rfpllModulus = 8388593;
+
 /**
 	@brief Gets the sample rate the AD936x actually runs at when asked for a given rate
 
@@ -101,6 +116,7 @@ IIOMockContext::IIOMockContext(const string& uri, const Variant& variant)
 	, m_variant(variant)
 	, m_sampleIndex(0)
 	, m_rng(0)
+	, m_rxSynthFromRegisters(false)
 {
 	m_ctxAttrs["hw_model"] = variant.hwModel;
 	m_ctxAttrs["hw_model_variant"] = "1";
@@ -155,6 +171,13 @@ IIOMockContext::IIOMockContext(const string& uri, const Variant& variant)
 	AddAttr(g_phy, "altvoltage1", true, "frequency", "2400000000");
 	AddAttr(g_phy, "altvoltage1", true, "frequency_available",
 		"[" + to_string(variant.minLoHz) + " 1 " + to_string(variant.maxLoHz) + "]", false);
+
+	AddAttr(g_phy, "", false, "xo_correction", to_string(g_xoHz));
+
+	//The reference to the RF synthesizers is the crystal doubled, which is what a Pluto does
+	m_regs[g_regRefDivideConfig1] = 0x07;
+	m_regs[g_regRefDivideConfig2] = 0xFF;
+	TuneRxSynth(2400000000);
 
 	AddChannel(g_phy, false, "temp0");
 	AddAttr(g_phy, "temp0", false, "input", "45000", false);
@@ -353,6 +376,14 @@ bool IIOMockContext::WriteAttr(
 				LogError("Failed to write IIO attribute %s = %" PRId64 ": %s\n", what.c_str(), v, strerror(EINVAL));
 				return false;
 			}
+			//Like the real driver, asking for the frequency it's already at doesn't do anything (even if the synth
+			//was reprogrammed through its registers since)
+			if(chan == "altvoltage0")
+			{
+				if(to_string(v) == it->second.value)
+					return true;
+				TuneRxSynth(v);
+			}
 		}
 
 		//Sample rate is shared by RX and TX and out of range values are rejected
@@ -462,6 +493,7 @@ bool IIOMockContext::ReadChannelAttr(
 		LogError("IIO channel \"%s/%s\" (%s) not found\n", dev.c_str(), chan.c_str(), output ? "out" : "in");
 		return false;
 	}
+
 	return ReadAttr(dev, id, output, attr, value);
 }
 
@@ -477,6 +509,95 @@ bool IIOMockContext::WriteChannelAttr(
 		return false;
 	}
 	return WriteAttr(dev, id, output, attr, value);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Registers
+
+bool IIOMockContext::HasRegisterAccess(const string& dev)
+{
+	return dev == g_phy;
+}
+
+bool IIOMockContext::ReadRegister(const string& dev, uint32_t addr, uint32_t& value)
+{
+	lock_guard<recursive_mutex> lock(m_mutex);
+
+	if(dev != g_phy)
+	{
+		LogError("Failed to read IIO register %s/0x%03x: %s\n", dev.c_str(), addr, strerror(ENODEV));
+		return false;
+	}
+
+	auto it = m_regs.find(addr);
+	value = (it == m_regs.end()) ? 0 : it->second;
+	return true;
+}
+
+bool IIOMockContext::WriteRegister(const string& dev, uint32_t addr, uint32_t value)
+{
+	lock_guard<recursive_mutex> lock(m_mutex);
+
+	if( (dev != g_phy) || (value > 0xFF) )
+	{
+		LogError("Failed to write IIO register %s/0x%03x = 0x%02x: %s\n", dev.c_str(), addr, value, strerror(EINVAL));
+		return false;
+	}
+	m_regs[addr] = value;
+
+	//Writing integer byte 0 starts the VCO calibration, which locks if the VCO can get there
+	if(addr == g_regRxIntegerByte0)
+	{
+		m_rxSynthFromRegisters = true;
+		double div = 2 << (m_regs[g_regRfpllDividers] & 0xF);
+		double vco = GetRxSynthFrequency() * div;
+		m_regs[g_regRxVcoLock] = ( (vco >= 6e9) && (vco <= 12e9) ) ? 0x02 : 0x00;
+	}
+	return true;
+}
+
+///@brief Gets the reference frequency of the RF synthesizers (the RX one, but both are the same here)
+double IIOMockContext::GetRfpllRef()
+{
+	int scaler = ((m_regs[g_regRefDivideConfig1] & 1) << 1) | (m_regs[g_regRefDivideConfig2] >> 7);
+	static const double scale[4] = { 1, 0.5, 0.25, 2 };
+	return g_xoHz * scale[scaler];
+}
+
+///@brief Programs the RX synth registers for a frequency, the way the real driver does
+void IIOMockContext::TuneRxSynth(int64_t freq)
+{
+	//Smallest divider (a power of two from 2 to 128) that puts the VCO above 6 GHz
+	int code = 0;
+	double vco = freq * 2.0;
+	while( (vco <= 6e9) && (code < 6) )
+	{
+		vco *= 2;
+		code ++;
+	}
+
+	double n = vco / GetRfpllRef();
+	uint32_t integer = floor(n);
+	uint32_t fract = llround((n - integer) * g_rfpllModulus);
+
+	m_regs[g_regRfpllDividers] = (m_regs[g_regRfpllDividers] & 0xF0) | code;
+	m_regs[g_regRxFractByte2] = (fract >> 16) & 0x7F;
+	m_regs[g_regRxFractByte1] = (fract >> 8) & 0xFF;
+	m_regs[g_regRxFractByte0] = fract & 0xFF;
+	m_regs[g_regRxIntegerByte1] = (integer >> 8) & 0x07;
+	m_regs[g_regRxIntegerByte0] = integer & 0xFF;
+	m_regs[g_regRxVcoLock] = 0x02;
+	m_rxSynthFromRegisters = false;
+}
+
+///@brief Works out the RX LO frequency from the synth registers, rounded to the nearest Hz
+int64_t IIOMockContext::GetRxSynthFrequency()
+{
+	uint32_t integer = ((m_regs[g_regRxIntegerByte1] & 0x07) << 8) | m_regs[g_regRxIntegerByte0];
+	uint32_t fract = ((m_regs[g_regRxFractByte2] & 0x7F) << 16) | (m_regs[g_regRxFractByte1] << 8) |
+		m_regs[g_regRxFractByte0];
+	double div = 2 << (m_regs[g_regRfpllDividers] & 0xF);
+	return llround(GetRfpllRef() * (integer + fract / g_rfpllModulus) / div);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -589,6 +710,10 @@ bool IIOMockContext::CaptureBlock(
 		{
 			return false;
 		}
+
+		//The signal is received wherever the synth really is
+		if(m_rxSynthFromRegisters)
+			lo = GetRxSynthFrequency();
 	}
 
 	//Take as long as a real capture would, but don't hang the caller for ages on huge captures

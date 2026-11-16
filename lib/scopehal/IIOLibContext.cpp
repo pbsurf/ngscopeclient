@@ -289,6 +289,58 @@ bool IIOLibContext::WriteChannelAttr(
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Direct register access
+
+bool IIOLibContext::HasRegisterAccess(const string& dev)
+{
+	lock_guard<recursive_mutex> lock(m_mutex);
+
+	//libiio does register access through this debug attribute
+	auto d = iio_context_find_device(m_ctx, dev.c_str());
+	return d && iio_device_find_debug_attr(d, "direct_reg_access");
+}
+
+bool IIOLibContext::ReadRegister(const string& dev, uint32_t addr, uint32_t& value)
+{
+	lock_guard<recursive_mutex> lock(m_mutex);
+
+	auto d = iio_context_find_device(m_ctx, dev.c_str());
+	if(!d)
+	{
+		LogError("IIO device \"%s\" not found\n", dev.c_str());
+		return false;
+	}
+
+	int ret = iio_device_reg_read(d, addr, &value);
+	if(ret < 0)
+	{
+		LogError("Failed to read IIO register %s/0x%03x: %s\n", dev.c_str(), addr, strerror(-ret));
+		return false;
+	}
+	return true;
+}
+
+bool IIOLibContext::WriteRegister(const string& dev, uint32_t addr, uint32_t value)
+{
+	lock_guard<recursive_mutex> lock(m_mutex);
+
+	auto d = iio_context_find_device(m_ctx, dev.c_str());
+	if(!d)
+	{
+		LogError("IIO device \"%s\" not found\n", dev.c_str());
+		return false;
+	}
+
+	int ret = iio_device_reg_write(d, addr, value);
+	if(ret < 0)
+	{
+		LogError("Failed to write IIO register %s/0x%03x = 0x%02x: %s\n", dev.c_str(), addr, value, strerror(-ret));
+		return false;
+	}
+	return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Streaming
 
 bool IIOLibContext::CaptureBlock(

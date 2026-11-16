@@ -83,6 +83,212 @@ static const size_t g_sweepKernelBuffers = 1;
 static const size_t g_sweepDiscard = 0;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Tuning the RX LO below where the Linux driver goes
+//
+// The driver refuses to tune the RX synth below 70 MHz (it only promises 70 MHz - 6 GHz), but the synthesizer itself
+// goes down to 46.875 MHz: its VCO runs from 6 to 12 GHz and is divided by up to 128. The TX synth, which is the same,
+// is allowed down there. So below 70 MHz we have the driver tune to 70 MHz (which divides by 128 too, and sets up
+// everything else for that band), then reprogram the RX synth for the frequency we want the same way the driver does
+// in ad9361_rfpll_set_rate().
+
+//The lowest frequency the driver tunes the RX LO to. We only go lower if this is what it says its limit is.
+static const int64_t g_driverMinRxLo = 70000000;
+
+//The lowest frequency we tune the RX LO to: the VCO has to be above 6 GHz (as the driver insists) at a divider of 128
+static const int64_t g_minRxLo = 46875001;
+
+//Divider code of the VCO divider for 128 (the codes are 0 - 6 for dividing by 2 - 128)
+static const uint32_t g_rxVcoDivider128 = 6;
+
+//How long to wait for the RX synth to lock after reprogramming it
+static const chrono::milliseconds g_rxSynthLockTimeout(10);
+
+//Modulus of the fractional word of the synthesizers
+static const double g_rfpllModulus = 8388593;
+
+//AD936x registers we need (UG-570)
+static const uint32_t g_regRfpllDividers = 0x005;
+static const uint32_t g_regRxIntegerByte0 = 0x231;
+static const uint32_t g_regRxIntegerByte1 = 0x232;
+static const uint32_t g_regRxFractByte0 = 0x233;
+static const uint32_t g_regRxFractByte1 = 0x234;
+static const uint32_t g_regRxFractByte2 = 0x235;
+static const uint32_t g_regRxForceVcoTune1 = 0x238;
+static const uint32_t g_regRxAlcVaractor = 0x239;
+static const uint32_t g_regRxVcoOutput = 0x23A;
+static const uint32_t g_regRxCpCurrent = 0x23B;
+static const uint32_t g_regRxLoopFilter1 = 0x23E;
+static const uint32_t g_regRxLoopFilter2 = 0x23F;
+static const uint32_t g_regRxLoopFilter3 = 0x240;
+static const uint32_t g_regRxVcoBias1 = 0x242;
+static const uint32_t g_regRxVcoCalRef = 0x245;
+static const uint32_t g_regRxCpOverrangeVcoLock = 0x247;
+static const uint32_t g_regRxVcoVaractorCtrl0 = 0x250;
+static const uint32_t g_regRxVcoVaractorCtrl1 = 0x251;
+static const uint32_t g_regRefDivideConfig1 = 0x2AB;
+static const uint32_t g_regRefDivideConfig2 = 0x2AC;
+
+/**
+	@brief Settings of a synthesizer for a range of VCO frequencies, from the lookup table in the Linux driver
+ */
+struct SynthSettings
+{
+	///@brief Lowest VCO frequency these are for, in MHz (they're for up to the next entry's)
+	uint16_t vcoMHz;
+
+	uint8_t vcoOutputLevel;
+	uint8_t vcoVaractor;
+	uint8_t vcoBiasRef;
+	uint8_t vcoBiasTcf;
+	uint8_t vcoCalOffset;
+	uint8_t vcoVaractorReference;
+	uint8_t chargePumpCurrent;
+	uint8_t loopFilterC2;
+	uint8_t loopFilterC1;
+	uint8_t loopFilterR1;
+	uint8_t loopFilterC3;
+	uint8_t loopFilterR3;
+};
+
+//Number of entries we need from each table: those from 6 GHz up to the one for the VCO at 70 MHz * 128 (8.96 GHz)
+static const size_t g_lowSynthEntries = 38;
+
+/**
+	@brief The part of the FDD lookup table of the Linux driver (SynthLUT_FDD in ad9361.c) for VCO frequencies below
+	8.96 GHz, for each of the three reference frequency ranges it has tables for (up to 50 MHz, up to 70 MHz, and
+	above). Entries are in descending order of frequency.
+
+	The driver uses its TDD table instead if the radio is in TDD mode, or when the RX and TX LOs are at the same
+	frequency, which we don't bother with.
+ */
+static const SynthSettings g_lowSynthSettings[3][g_lowSynthEntries] =
+{
+	//40 MHz reference
+	{
+		{ 8946, 13, 1, 6, 2, 12, 12, 14, 15, 6, 14, 5, 15 },
+		{ 8797, 12, 1, 7, 2, 12, 12, 13, 15, 6, 14, 5, 15 },
+		{ 8655, 12, 1, 7, 2, 12, 12, 14, 15, 6, 14, 5, 15 },
+		{ 8520, 12, 1, 7, 2, 12, 12, 14, 15, 6, 14, 5, 15 },
+		{ 8392, 12, 1, 7, 2, 12, 12, 15, 15, 6, 14, 5, 15 },
+		{ 8269, 12, 1, 7, 2, 12, 12, 15, 15, 6, 14, 5, 15 },
+		{ 8153, 12, 1, 7, 2, 12, 12, 16, 15, 6, 14, 5, 15 },
+		{ 8041, 12, 1, 7, 2, 13, 12, 16, 15, 6, 14, 5, 15 },
+		{ 7934, 11, 1, 7, 2, 12, 12, 16, 15, 6, 14, 5, 15 },
+		{ 7831, 11, 1, 7, 2, 12, 12, 16, 15, 6, 14, 5, 15 },
+		{ 7733, 10, 1, 7, 3, 13, 12, 16, 15, 6, 14, 5, 15 },
+		{ 7638, 10, 1, 7, 2, 12, 12, 16, 15, 6, 14, 5, 15 },
+		{ 7547, 10, 1, 7, 2, 12, 12, 17, 15, 6, 14, 5, 15 },
+		{ 7459, 10, 1, 7, 2, 12, 12, 17, 15, 6, 14, 5, 15 },
+		{ 7374, 10, 2, 7, 3, 14, 13, 14, 15, 6, 14, 5, 15 },
+		{ 7291, 10, 2, 7, 3, 14, 13, 14, 15, 6, 14, 5, 15 },
+		{ 7212, 10, 2, 7, 3, 14, 13, 14, 15, 6, 14, 5, 15 },
+		{ 7135, 10, 2, 7, 3, 14, 13, 15, 15, 7, 14, 5, 15 },
+		{ 7061, 10, 2, 7, 3, 14, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6988, 10, 1, 7, 3, 12, 14, 20, 15, 6, 14, 5, 15 },
+		{ 6918, 9, 2, 7, 3, 14, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6850, 9, 2, 7, 3, 14, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6784, 9, 2, 7, 2, 13, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6720, 9, 2, 7, 2, 13, 13, 16, 15, 6, 14, 5, 15 },
+		{ 6658, 8, 2, 7, 3, 14, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6597, 8, 2, 7, 2, 13, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6539, 8, 2, 7, 2, 13, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6482, 8, 2, 7, 2, 13, 13, 16, 15, 6, 14, 5, 15 },
+		{ 6427, 7, 2, 7, 3, 14, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6373, 7, 2, 7, 3, 15, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6321, 7, 2, 7, 3, 15, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6270, 7, 2, 7, 3, 15, 13, 16, 15, 6, 14, 5, 15 },
+		{ 6222, 7, 2, 7, 3, 15, 13, 16, 15, 6, 14, 5, 15 },
+		{ 6174, 6, 2, 7, 3, 15, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6128, 6, 2, 7, 3, 15, 13, 15, 15, 6, 14, 5, 15 },
+		{ 6083, 6, 2, 7, 3, 15, 13, 16, 15, 6, 14, 5, 15 },
+		{ 6040, 6, 2, 7, 3, 15, 13, 16, 15, 6, 14, 5, 15 },
+		{ 5997, 6, 2, 7, 3, 15, 13, 16, 15, 6, 14, 5, 15 },
+	},
+	//60 MHz reference
+	{
+		{ 8946, 13, 1, 6, 2, 12, 12, 24, 15, 13, 12, 5, 13 },
+		{ 8797, 12, 1, 7, 2, 12, 12, 24, 15, 13, 12, 5, 13 },
+		{ 8655, 12, 1, 7, 2, 12, 12, 25, 15, 13, 12, 5, 13 },
+		{ 8520, 12, 1, 7, 2, 12, 12, 25, 15, 13, 12, 5, 13 },
+		{ 8392, 12, 1, 7, 2, 12, 12, 26, 15, 13, 12, 5, 13 },
+		{ 8269, 12, 1, 7, 2, 12, 12, 27, 15, 13, 12, 5, 13 },
+		{ 8153, 12, 1, 7, 2, 12, 12, 28, 15, 13, 12, 5, 13 },
+		{ 8041, 12, 1, 7, 2, 13, 12, 29, 15, 13, 12, 5, 13 },
+		{ 7934, 11, 1, 7, 2, 12, 12, 28, 15, 13, 12, 5, 13 },
+		{ 7831, 11, 1, 7, 2, 12, 12, 29, 15, 13, 12, 5, 13 },
+		{ 7733, 10, 1, 7, 3, 13, 12, 28, 15, 13, 12, 5, 13 },
+		{ 7638, 10, 1, 7, 2, 12, 12, 29, 15, 13, 12, 5, 13 },
+		{ 7547, 10, 1, 7, 2, 12, 12, 29, 15, 13, 12, 5, 13 },
+		{ 7459, 10, 1, 7, 2, 12, 12, 30, 15, 13, 12, 5, 13 },
+		{ 7374, 10, 2, 7, 3, 14, 13, 24, 15, 13, 12, 5, 13 },
+		{ 7291, 10, 2, 7, 3, 14, 13, 25, 15, 13, 12, 5, 13 },
+		{ 7212, 10, 2, 7, 3, 14, 13, 25, 15, 13, 12, 5, 13 },
+		{ 7135, 10, 2, 7, 3, 14, 13, 26, 15, 13, 12, 5, 13 },
+		{ 7061, 10, 2, 7, 3, 14, 13, 26, 15, 13, 12, 5, 13 },
+		{ 6988, 10, 1, 7, 3, 12, 14, 35, 15, 13, 12, 5, 13 },
+		{ 6918, 9, 1, 7, 3, 12, 14, 33, 15, 13, 12, 5, 13 },
+		{ 6850, 9, 1, 7, 3, 12, 14, 34, 15, 13, 12, 5, 13 },
+		{ 6784, 9, 1, 7, 2, 11, 14, 35, 15, 13, 12, 5, 13 },
+		{ 6720, 9, 1, 7, 2, 11, 14, 35, 15, 13, 12, 5, 13 },
+		{ 6658, 8, 2, 7, 3, 15, 13, 26, 15, 13, 12, 5, 13 },
+		{ 6597, 8, 2, 7, 2, 15, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6539, 8, 2, 7, 2, 15, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6482, 8, 2, 7, 2, 15, 13, 28, 15, 13, 12, 5, 13 },
+		{ 6427, 7, 2, 7, 3, 14, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6373, 7, 2, 7, 3, 15, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6321, 7, 2, 7, 3, 15, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6270, 7, 2, 7, 3, 15, 13, 28, 15, 13, 12, 5, 13 },
+		{ 6222, 7, 2, 7, 3, 15, 13, 28, 15, 13, 12, 5, 13 },
+		{ 6174, 6, 2, 7, 3, 15, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6128, 6, 2, 7, 3, 15, 13, 27, 15, 13, 12, 5, 13 },
+		{ 6083, 6, 2, 7, 3, 15, 13, 28, 15, 13, 12, 5, 13 },
+		{ 6040, 6, 2, 7, 3, 15, 13, 28, 15, 13, 12, 5, 13 },
+		{ 5997, 6, 2, 7, 3, 15, 13, 29, 15, 13, 12, 5, 13 },
+	},
+	//80 MHz reference
+	{
+		{ 8946, 13, 1, 6, 2, 12, 12, 13, 15, 6, 13, 5, 14 },
+		{ 8797, 12, 1, 7, 2, 12, 12, 13, 15, 6, 13, 5, 14 },
+		{ 8655, 12, 1, 7, 2, 12, 12, 14, 15, 6, 13, 5, 14 },
+		{ 8520, 12, 1, 7, 2, 12, 12, 14, 15, 6, 13, 5, 14 },
+		{ 8392, 12, 1, 7, 2, 12, 12, 15, 15, 7, 13, 5, 14 },
+		{ 8269, 12, 1, 7, 2, 12, 12, 15, 15, 6, 13, 5, 14 },
+		{ 8153, 12, 1, 7, 2, 12, 12, 15, 15, 6, 13, 5, 14 },
+		{ 8041, 12, 1, 7, 2, 13, 12, 16, 15, 6, 13, 5, 14 },
+		{ 7934, 11, 1, 7, 2, 12, 12, 15, 15, 6, 13, 5, 14 },
+		{ 7831, 11, 1, 7, 2, 12, 12, 16, 15, 6, 13, 5, 14 },
+		{ 7733, 10, 1, 7, 3, 13, 12, 15, 15, 6, 13, 5, 14 },
+		{ 7638, 10, 1, 7, 2, 12, 12, 16, 15, 6, 13, 5, 14 },
+		{ 7547, 10, 1, 7, 2, 12, 12, 16, 15, 6, 13, 5, 14 },
+		{ 7459, 10, 1, 7, 2, 12, 12, 17, 15, 6, 13, 5, 14 },
+		{ 7374, 10, 2, 7, 3, 14, 13, 13, 15, 6, 13, 5, 14 },
+		{ 7291, 10, 2, 7, 3, 14, 13, 14, 15, 6, 13, 5, 14 },
+		{ 7212, 10, 2, 7, 3, 14, 13, 14, 15, 6, 13, 5, 14 },
+		{ 7135, 10, 2, 7, 3, 14, 13, 14, 15, 6, 13, 5, 14 },
+		{ 7061, 10, 2, 7, 3, 14, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6988, 10, 1, 7, 3, 12, 14, 19, 15, 6, 13, 5, 14 },
+		{ 6918, 9, 2, 7, 3, 14, 13, 14, 15, 6, 13, 5, 14 },
+		{ 6850, 9, 2, 7, 3, 14, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6784, 9, 2, 7, 2, 13, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6720, 9, 2, 7, 2, 13, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6658, 8, 2, 7, 3, 14, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6597, 8, 2, 7, 2, 13, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6539, 8, 2, 7, 2, 13, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6482, 8, 2, 7, 2, 13, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6427, 7, 2, 7, 3, 14, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6373, 7, 2, 7, 3, 15, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6321, 7, 2, 7, 3, 15, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6270, 7, 2, 7, 3, 15, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6222, 7, 2, 7, 3, 15, 13, 16, 15, 6, 13, 5, 14 },
+		{ 6174, 6, 2, 7, 3, 15, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6128, 6, 2, 7, 3, 15, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6083, 6, 2, 7, 3, 15, 13, 15, 15, 6, 13, 5, 14 },
+		{ 6040, 6, 2, 7, 3, 15, 13, 16, 15, 6, 13, 5, 14 },
+		{ 5997, 6, 2, 7, 3, 15, 13, 16, 15, 6, 13, 5, 14 },
+	},
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Construction / destruction
 
 /**
@@ -114,6 +320,10 @@ IIOSDR::IIOSDR(SCPITransport* transport)
 	, m_txLoMax(6000000000)
 	, m_txMaxToneFreq(0)
 	, m_rssiStream(0)
+	, m_driverMinCenterFreq(g_driverMinRxLo)
+	, m_tuneBelowDriver(false)
+	, m_hwBelowDriver(false)
+	, m_hwBelowDriverFreq(0)
 	, m_hwCenterFreq(m_centerFreq)
 	, m_hwSampleRate(m_sampleRate)
 	, m_sweepStep(0)
@@ -302,6 +512,17 @@ void IIOSDR::DetectLimits()
 	{
 		m_limits.minCenterFreq = lo;
 		m_limits.maxCenterFreq = hi;
+	}
+
+	//If the driver goes down to the limit we know it has, and we can get at the registers, we can go lower
+	m_driverMinCenterFreq = m_limits.minCenterFreq;
+	m_tuneBelowDriver = false;
+	double ref;
+	if( (m_limits.minCenterFreq == g_driverMinRxLo) && m_ctx->HasRegisterAccess(g_phyDevice) && ReadRfpllRef(ref) )
+	{
+		m_tuneBelowDriver = true;
+		m_limits.minCenterFreq = g_minRxLo;
+		LogDebug("Can tune the RX LO below %" PRId64 " Hz (synthesizer reference %.0f Hz)\n", g_driverMinRxLo, ref);
 	}
 	if(ReadRange(m_ctx, g_phyDevice, "voltage0", false, "rf_bandwidth_available", lo, hi))
 	{
@@ -496,7 +717,21 @@ void IIOSDR::ReadHardwareConfiguration()
 	int64_t rate;
 	int64_t bw;
 	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", lo))
+	{
+		//Someone may have left the RX synth below where the driver goes. The driver would still say it's at its
+		//lowest frequency then, so look at what's really in the synth (allowing for the words not hitting the
+		//driver's frequency exactly).
+		int64_t synth;
+		m_hwBelowDriver = false;
+		if(m_tuneBelowDriver && (lo == m_driverMinCenterFreq) && ReadRxSynthFrequency(synth) &&
+			(synth < m_driverMinCenterFreq - 1000))
+		{
+			m_hwBelowDriver = true;
+			m_hwBelowDriverFreq = synth;
+			lo = synth;
+		}
 		m_centerFreq = lo;
+	}
 	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "sampling_frequency", rate))
 		m_sampleRate = rate;
 	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "rf_bandwidth", bw))
@@ -685,9 +920,15 @@ void IIOSDR::ApplyConfiguration()
 		m_ctx->WriteChannelAttrInt(g_phyDevice, "voltage0", false, "rf_bandwidth", bw);
 	}
 	if(doFreq && !sweep)
-		m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", freq);
+		WriteRxLo(freq);
 	if(doTxLo)
 		m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage1", true, "frequency", txLo);
+
+	//If we programmed the RX synth ourselves, the driver may have reprogrammed it while changing the TX LO (it does
+	//when they're the same in FDD mode), so do it again. Changing the sample rate or analog bandwidth retunes the RX LO
+	//above, or at the next step of a sweep.
+	if(m_hwBelowDriver && doTxLo)
+		WriteLowRxLo(m_hwBelowDriverFreq);
 	for(size_t i=0; i<m_numTx; i++)
 	{
 		if(doTxAtten[i])
@@ -725,7 +966,7 @@ void IIOSDR::ApplyConfiguration()
 	int64_t hwFreq;
 	int64_t hwSpan;
 	int64_t hwRate;
-	bool haveFreq = m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", hwFreq);
+	bool haveFreq = ReadRxLo(hwFreq);
 	bool haveSpan = m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "rf_bandwidth", hwSpan);
 	bool haveRate = m_ctx->ReadChannelAttrInt(g_phyDevice, "voltage0", false, "sampling_frequency", hwRate);
 
@@ -1274,16 +1515,233 @@ vector<int64_t> IIOSDR::GetSweepFrequencies(int64_t center, int64_t span, uint64
  */
 void IIOSDR::Retune(int64_t freq)
 {
-	m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", freq);
+	WriteRxLo(freq);
 
 	//The synthesizer can't necessarily hit the exact frequency
 	int64_t hwFreq;
-	if(m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", hwFreq))
+	if(ReadRxLo(hwFreq))
 		m_hwCenterFreq = hwFreq;
 	else
 		m_hwCenterFreq = freq;
 
 	this_thread::sleep_for(g_sweepSettleTime);
+}
+
+/**
+	@brief Gets the reference frequency of the RX synth from the crystal frequency (xo_correction) and the reference
+	scaler
+
+	@return True if it could be read, and is in the range the synthesizer takes (10 - 80 MHz)
+ */
+bool IIOSDR::ReadRfpllRef(double& ref)
+{
+	string xo;
+	uint32_t config1;
+	uint32_t config2;
+	if( !m_ctx->ReadDeviceAttr(g_phyDevice, "xo_correction", xo) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRefDivideConfig1, config1) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRefDivideConfig2, config2) )
+	{
+		return false;
+	}
+
+	//The RX reference scaler is bit 0 of one register (MSB) and bit 7 of the next (LSB): x1, /2, /4, or x2
+	static const double scale[4] = { 1, 0.5, 0.25, 2 };
+	int scaler = ((config1 & 1) << 1) | ((config2 >> 7) & 1);
+	ref = strtod(xo.c_str(), nullptr) * scale[scaler];
+
+	//Same limits as the driver (with 100 ppm of slack)
+	return (ref >= 9999000) && (ref <= 80008000);
+}
+
+/**
+	@brief Reads back the RX LO frequency
+
+	This is what the driver says, unless we programmed the RX synth ourselves, in which case it's what we programmed.
+	Only called from the instrument thread.
+ */
+bool IIOSDR::ReadRxLo(int64_t& freq)
+{
+	if(m_hwBelowDriver)
+	{
+		freq = m_hwBelowDriverFreq;
+		return true;
+	}
+	return m_ctx->ReadChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", freq);
+}
+
+/**
+	@brief Works out the RX LO frequency from the RX synth registers, rounded to the nearest Hz
+ */
+bool IIOSDR::ReadRxSynthFrequency(int64_t& freq)
+{
+	double ref;
+	uint32_t div;
+	uint32_t b[5];
+	if( !ReadRfpllRef(ref) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRfpllDividers, div) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRxIntegerByte0, b[0]) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRxIntegerByte1, b[1]) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRxFractByte0, b[2]) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRxFractByte1, b[3]) ||
+		!m_ctx->ReadRegister(g_phyDevice, g_regRxFractByte2, b[4]) )
+	{
+		return false;
+	}
+
+	uint32_t integer = ((b[1] & 0x07) << 8) | b[0];
+	uint32_t fract = ((b[4] & 0x7F) << 16) | (b[3] << 8) | b[2];
+	double vcoDiv = 2 << (div & 0x0F);
+	freq = llround(ref * (integer + fract / g_rfpllModulus) / vcoDiv);
+	return true;
+}
+
+/**
+	@brief Tunes the RX LO, programming the RX synth ourselves below where the driver goes
+
+	Failures are logged. Only called from the instrument thread.
+
+	@param freq	LO frequency in Hz
+ */
+void IIOSDR::WriteRxLo(int64_t freq)
+{
+	if(m_tuneBelowDriver && (freq < m_driverMinCenterFreq))
+	{
+		WriteLowRxLo(freq);
+		return;
+	}
+
+	//The driver doesn't do anything if asked for the frequency it thinks it's at already. If we programmed the synth
+	//ourselves, it thinks it's at its lowest frequency, so to go there for real, go somewhere else first.
+	if(m_hwBelowDriver && (freq == m_driverMinCenterFreq))
+	{
+		int64_t other = (freq + 1000000 <= m_limits.maxCenterFreq) ? freq + 1000000 : freq - 1000000;
+		m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", other);
+	}
+	m_hwBelowDriver = false;
+
+	m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", freq);
+}
+
+/**
+	@brief Tunes the RX LO below the lowest frequency the driver goes to, by programming the RX synth ourselves
+
+	The driver tunes to its lowest frequency first, which sets up everything other than the synth for the band, and
+	divides the VCO by 128 like we need to. Then we write the VCO settings from the driver's lookup table, and the
+	integer and fractional words, in the same order as the driver does. Writing the last one starts the VCO
+	calibration.
+
+	The driver still reports its lowest frequency afterwards (the LO attribute is the rate of a clock mux, which is
+	never worked out from the synth registers again), so ReadRxLo() reports what we tuned to instead.
+
+	Failures are logged. Only called from the instrument thread.
+
+	@param freq	LO frequency in Hz, at least g_minRxLo
+
+	@return True if the synth locked
+ */
+bool IIOSDR::WriteLowRxLo(int64_t freq)
+{
+	freq = max(freq, g_minRxLo);
+
+	double ref;
+	if(!ReadRfpllRef(ref))
+	{
+		LogError("Can't tune the RX LO to %" PRId64 " Hz: couldn't work out the synthesizer reference\n", freq);
+		return false;
+	}
+
+	//Let the driver tune to the bottom of its range first (if it thinks it's already there, because we already
+	//programmed the synth ourselves, it doesn't do anything, which is fine)
+	if(!m_ctx->WriteChannelAttrInt(g_phyDevice, "altvoltage0", true, "frequency", m_driverMinCenterFreq))
+		return false;
+	m_hwBelowDriver = false;
+
+	//The words, rounded the same way as the driver does
+	double vco = freq * 128.0;
+	double n = vco / ref;
+	uint32_t integer = floor(n);
+	uint32_t fract = llround((n - integer) * g_rfpllModulus);
+	if(fract >= g_rfpllModulus)
+	{
+		integer ++;
+		fract = 0;
+	}
+
+	//The driver picks the table by the reference frequency, then the first entry at or below the VCO frequency
+	int table = (ref < 50000000) ? 0 : (ref <= 70000000) ? 1 : 2;
+	int64_t vcoMHz = static_cast<int64_t>(vco / 1e6);
+	size_t i = 0;
+	while( (i < g_lowSynthEntries - 1) && (g_lowSynthSettings[table][i].vcoMHz > vcoMHz) )
+		i++;
+	auto& set = g_lowSynthSettings[table][i];
+
+	//From here on the synth isn't where the driver thinks it is, even if we don't get it to lock
+	m_hwBelowDriver = true;
+	m_hwBelowDriverFreq = llround(ref * (integer + fract / g_rfpllModulus) / 128);
+
+	//Read-modify-write of only some of the bits of a register
+	bool ok = true;
+	auto writeBits = [&](uint32_t addr, uint32_t mask, uint32_t value)
+	{
+		uint32_t old;
+		if(!m_ctx->ReadRegister(g_phyDevice, addr, old))
+		{
+			ok = false;
+			return;
+		}
+		ok &= m_ctx->WriteRegister(g_phyDevice, addr, (old & ~mask & 0xFF) | (value & mask));
+	};
+	auto write = [&](uint32_t addr, uint32_t value)
+	{
+		ok &= m_ctx->WriteRegister(g_phyDevice, addr, value);
+	};
+
+	//VCO settings (ad9361_rfpll_vco_init())
+	write(g_regRxVcoOutput, set.vcoOutputLevel | 0x40);						//with PORb VCO logic
+	writeBits(g_regRxAlcVaractor, 0x0F, set.vcoVaractor);
+	write(g_regRxVcoBias1, set.vcoBiasRef | (set.vcoBiasTcf << 3));
+	write(g_regRxForceVcoTune1, set.vcoCalOffset << 3);
+	write(g_regRxVcoVaractorCtrl1, set.vcoVaractorReference);
+	write(g_regRxVcoCalRef, 0);
+	write(g_regRxVcoVaractorCtrl0, 7 << 4);								//varactor reference TCF of 7, offset of 0
+	writeBits(g_regRxCpCurrent, 0x3F, set.chargePumpCurrent);
+	write(g_regRxLoopFilter1, (set.loopFilterC2 << 4) | set.loopFilterC1);
+	write(g_regRxLoopFilter2, (set.loopFilterR1 << 4) | set.loopFilterC3);
+	write(g_regRxLoopFilter3, set.loopFilterR3);
+
+	//Fractional then integer word, then the divider (it should already be 128, but make sure)
+	write(g_regRxFractByte2, (fract >> 16) & 0x7F);
+	write(g_regRxFractByte1, (fract >> 8) & 0xFF);
+	write(g_regRxFractByte0, fract & 0xFF);
+	writeBits(g_regRxIntegerByte1, 0x07, integer >> 8);
+	write(g_regRxIntegerByte0, integer & 0xFF);
+	writeBits(g_regRfpllDividers, 0x0F, g_rxVcoDivider128);
+	if(!ok)
+	{
+		LogError("Failed to program the RX synth for %" PRId64 " Hz\n", freq);
+		return false;
+	}
+
+	//Wait for the VCO calibration to finish and the synth to lock
+	auto start = chrono::steady_clock::now();
+	bool locked = false;
+	while(true)
+	{
+		uint32_t lock;
+		if(!m_ctx->ReadRegister(g_phyDevice, g_regRxCpOverrangeVcoLock, lock))
+			break;
+		locked = (lock & 0x02) != 0;
+		if(locked || (chrono::steady_clock::now() - start > g_rxSynthLockTimeout))
+			break;
+		this_thread::sleep_for(chrono::microseconds(100));
+	}
+	if(!locked)
+	{
+		LogError("RX synth didn't lock at %" PRId64 " Hz\n", freq);
+		return false;
+	}
+	return true;
 }
 
 int64_t IIOSDR::GetSpan()

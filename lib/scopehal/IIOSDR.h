@@ -65,6 +65,11 @@
 	In single trigger mode, the radio stays armed until it has been through the whole sweep. With sweeping disabled,
 	the span is limited to the widest analog bandwidth.
 
+	The Linux driver won't tune the RX LO below 70 MHz, although the synthesizer goes down to 46.875 MHz (its VCO at 6
+	GHz, divided by 128). If the registers can be written (through the driver's debug interface), we tune below 70 MHz
+	by letting the driver tune to 70 MHz and then reprogramming the RX synth ourselves. See WriteLowRxLo(). The driver
+	still reports 70 MHz then, so we keep track of the LO ourselves (and work it out from the registers on startup).
+
 	The capture buffer is kept open while the trigger is armed, since setting one up takes much longer than a capture.
 	Samples queued in it from before a settings change are thrown away. While sweeping, the radio only gets one
 	kernel buffer, so it only captures a block when we ask for one and nothing has to be thrown away after a retune.
@@ -209,6 +214,11 @@ protected:
 	bool IsSweeping(bool enabled, int64_t span, uint64_t rate);
 	std::vector<int64_t> GetSweepFrequencies(int64_t center, int64_t span, uint64_t rate, size_t depth, double fraction);
 	void Retune(int64_t freq);
+	bool ReadRfpllRef(double& ref);
+	void WriteRxLo(int64_t freq);
+	bool WriteLowRxLo(int64_t freq);
+	bool ReadRxLo(int64_t& freq);
+	bool ReadRxSynthFrequency(int64_t& freq);
 
 	///@brief The IIO context (owned by the transport), or nullptr if we failed to find a supported device
 	IIOContext* m_ctx;
@@ -271,6 +281,25 @@ protected:
 
 	///@brief Limits of the radio. Set at startup and never changes.
 	Limits m_limits;
+
+	/**
+		@brief Lowest RX LO frequency the Linux driver will tune to. Set at startup and never changes.
+
+		If m_tuneBelowDriver is set, m_limits goes lower than this, and below it we program the RX synth ourselves.
+	 */
+	int64_t m_driverMinCenterFreq;
+
+	///@brief True if we can tune the RX LO below m_driverMinCenterFreq. Set at startup and never changes.
+	bool m_tuneBelowDriver;
+
+	///@brief True if we programmed the RX synth ourselves, below m_driverMinCenterFreq, and nothing has changed it
+	///since. Only touched by the instrument thread.
+	bool m_hwBelowDriver;
+
+	///@brief What we last programmed the RX synth to (the frequency it really is, from the integer and fractional
+	///words), if m_hwBelowDriver is set. The driver still reports its lowest frequency then. Only touched by the
+	///instrument thread.
+	int64_t m_hwBelowDriverFreq;
 
 	///@brief Configuration currently active in the hardware. Only touched by the instrument thread.
 	int64_t m_hwCenterFreq;

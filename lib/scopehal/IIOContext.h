@@ -132,6 +132,13 @@ public:
 		const std::string& dev, const std::string& chan, bool output, const std::string& attr,
 		const std::string& value) =0;
 
+	//Direct register access (the driver's debug interface, so it isn't always there)
+
+	///@brief Checks if the registers of a device can be read and written directly, without logging an error if not
+	virtual bool HasRegisterAccess(const std::string& dev) =0;
+	virtual bool ReadRegister(const std::string& dev, uint32_t addr, uint32_t& value) =0;
+	virtual bool WriteRegister(const std::string& dev, uint32_t addr, uint32_t value) =0;
+
 	/**
 		@brief Captures a block of samples from a buffer-capable device
 

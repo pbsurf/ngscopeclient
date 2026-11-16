@@ -81,6 +81,10 @@ public:
 		const std::string& dev, const std::string& chan, bool output, const std::string& attr,
 		const std::string& value) override;
 
+	virtual bool HasRegisterAccess(const std::string& dev) override;
+	virtual bool ReadRegister(const std::string& dev, uint32_t addr, uint32_t& value) override;
+	virtual bool WriteRegister(const std::string& dev, uint32_t addr, uint32_t value) override;
+
 	virtual bool CaptureBlock(
 		const std::string& dev,
 		const std::vector<std::string>& channels,

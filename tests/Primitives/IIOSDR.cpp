@@ -1181,6 +1181,88 @@ TEST_CASE("IIOSDR_Limits")
 	REQUIRE(sdr->GetSpan() == 200000);
 }
 
+TEST_CASE("IIOSDR_TuneBelowDriver")
+{
+	IIOContext* ctx;
+	auto sdr = MakeSDR("mock:ad9361", ctx);
+	auto chan = sdr->GetChannel(0);
+	int64_t v;
+	uint32_t reg;
+
+	//The driver only goes down to 70 MHz, but we can go down to where the VCO is at 6 GHz divided by 128
+	sdr->SetCenterFrequency(0, 1);
+	REQUIRE(sdr->GetCenterFrequency(0) == 46875001);
+
+	//Below 70 MHz the synth is programmed through the registers. The driver still says it's at 70 MHz, but we know
+	//better (to within the resolution of the fractional word).
+	sdr->SetCenterFrequency(0, 50000000);
+	sdr->BackgroundProcessing();
+	REQUIRE(ctx->ReadChannelAttrInt(phy, "altvoltage0", true, "frequency", v));
+	REQUIRE(v == 70000000);
+	REQUIRE(llabs(sdr->GetCenterFrequency(0) - 50000000) < 10);
+
+	//From one low frequency to another
+	sdr->SetCenterFrequency(0, 47000000);
+	sdr->BackgroundProcessing();
+	REQUIRE(llabs(sdr->GetCenterFrequency(0) - 47000000) < 10);
+	sdr->SetCenterFrequency(0, 50000000);
+	sdr->BackgroundProcessing();
+	REQUIRE(llabs(sdr->GetCenterFrequency(0) - 50000000) < 10);
+	REQUIRE(ctx->ReadRegister(phy, 0x005, reg));
+	REQUIRE((reg & 0x0F) == 6);
+	REQUIRE(ctx->ReadRegister(phy, 0x247, reg));
+	REQUIRE((reg & 0x02) != 0);
+
+	//VCO settings for 6.4 GHz, from the entry for 6373 MHz and up of the table for an 80 MHz reference
+	REQUIRE(ctx->ReadRegister(phy, 0x23A, reg));
+	REQUIRE(reg == 0x47);
+	REQUIRE(ctx->ReadRegister(phy, 0x23E, reg));
+	REQUIRE(reg == 0xF6);
+	REQUIRE(ctx->ReadRegister(phy, 0x240, reg));
+	REQUIRE(reg == 0x0E);
+
+	//Back to exactly where the driver went to on the way really goes there (the driver ignores being asked for where
+	//it thinks it is already, so this takes a detour), and above it works like it always did
+	sdr->SetCenterFrequency(0, 70000000);
+	sdr->BackgroundProcessing();
+	REQUIRE(ctx->ReadChannelAttrInt(phy, "altvoltage0", true, "frequency", v));
+	REQUIRE(v == 70000000);
+	REQUIRE(sdr->GetCenterFrequency(0) == 70000000);
+	REQUIRE(ctx->ReadRegister(phy, 0x231, reg));
+	REQUIRE(reg == 0x70);
+	sdr->SetCenterFrequency(0, 100000000);
+	sdr->BackgroundProcessing();
+	REQUIRE(ctx->ReadChannelAttrInt(phy, "altvoltage0", true, "frequency", v));
+	REQUIRE(v == 100000000);
+
+	//Signals are received at the real LO: a looped back tone at 50.3 MHz (TX LO at 70 MHz, tone at -19.7 MHz) shows
+	//up 300 kHz above an RX LO of 50 MHz
+	sdr->SetSampleRate(61440000);
+	sdr->SetSpan(40000000);
+	sdr->SetSampleDepth(8192);
+	sdr->SetCenterFrequency(0, 50000000);
+	sdr->SetTxLOFrequency(70000000);
+	sdr->BackgroundProcessing();
+	sdr->SetTxToneFrequency(0, 0, -19700000);
+	REQUIRE(sdr->GetTxToneFrequency(0, 0) == -19700000);
+	sdr->SetTxToneAmplitude(0, 0, 0.5);
+	sdr->SetGainMode(0, "manual");
+	sdr->SetGain(0, 20);
+	sdr->BackgroundProcessing();
+	REQUIRE(llabs(sdr->GetCenterFrequency(0) - 50000000) < 10);
+	sdr->StartSingleTrigger();
+	REQUIRE(sdr->AcquireData());
+	REQUIRE(sdr->PopPendingWaveform());
+	double expected = InputAmplitude(7 + 20*log10(0.5) - 10 - 30);
+	REQUIRE(ToneMagnitude(chan->GetData(0), chan->GetData(1), 300000) == Catch::Approx(expected).epsilon(0.05));
+
+	//The AD9363 driver has its own limit, which we leave alone
+	IIOContext* ctx2;
+	auto sdr2 = MakeSDR("mock:ad9363", ctx2);
+	sdr2->SetCenterFrequency(0, 1);
+	REQUIRE(sdr2->GetCenterFrequency(0) == 325000000);
+}
+
 TEST_CASE("IIOSDR_SessionRoundTrip")
 {
 	IIOContext* ctx;

@@ -67,6 +67,12 @@
 	thermal noise dominates, so the noise floor referred to the input stays put; below that the ADC noise takes over
 	and it rises as the gain goes down.
 
+	The ad9361-phy registers can be read and written. Writing the RX LO frequency programs the RX synth registers the
+	way the real driver does (with an 80 MHz reference: the 40 MHz xo_correction doubled). If the RX synth is then
+	reprogrammed through its registers, signals are received wherever it really is, but like on the real driver the
+	frequency attribute still reads what was last written to it, and writing that again doesn't do anything. Writing
+	integer byte 0 starts a VCO calibration, which locks if the VCO is in range. None of the VCO settings are checked.
+
 	The attribute names, channel layout, and device names follow the Linux ad9361 driver as used by pyadi-iio.
 	Value ranges, clamping vs rejection of out-of-range writes, and default values are approximations chosen to
 	be plausible, and have NOT been validated against real hardware.
@@ -98,6 +104,10 @@ public:
 	virtual bool WriteChannelAttr(
 		const std::string& dev, const std::string& chan, bool output, const std::string& attr,
 		const std::string& value) override;
+
+	virtual bool HasRegisterAccess(const std::string& dev) override;
+	virtual bool ReadRegister(const std::string& dev, uint32_t addr, uint32_t& value) override;
+	virtual bool WriteRegister(const std::string& dev, uint32_t addr, uint32_t value) override;
 
 	virtual bool CaptureBlock(
 		const std::string& dev,
@@ -154,6 +164,21 @@ protected:
 	std::map<std::string, Attr> m_attrs;
 
 	std::recursive_mutex m_mutex;
+
+	double GetRfpllRef();
+	void TuneRxSynth(int64_t freq);
+	int64_t GetRxSynthFrequency();
+
+	///@brief Registers of the AD936x (only the ones something has read or written, the rest read as zero)
+	std::map<uint32_t, uint8_t> m_regs;
+
+	/**
+		@brief True if the RX synth was last programmed through its registers rather than the frequency attribute
+
+		Signals are received at the frequency in the registers then. Otherwise it's at the frequency attribute
+		exactly (the words don't hit most frequencies exactly, but that's not worth simulating).
+	 */
+	bool m_rxSynthFromRegisters;
 
 	///@brief Total number of samples generated so far, used to keep the simulated signals phase continuous
 	uint64_t m_sampleIndex;
