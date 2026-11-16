@@ -29,6 +29,11 @@ Our forks of scopehal, logtools, imgui, imgui-node-editor and the manual text ar
 * Timeline menu: Go to t = 0, Go to trigger, Zoom to Cursors
 * Markers at the plot edge for spectrum peaks scrolled out of view, and FFT peak labels that hold still on noisy spectra
 * The horizontal view uses double precision, so it can span more than 2.5 hours and cursors work far from t = 0
+* SDR transmit levels: a per-path TX calibration and external gain (in the new properties dialog for transmit paths) give each tone a Level in dBm, which can be set directly; the gain and the other tone's amplitude follow so nothing clips
+* AD936x: the RX LO tunes down to 46.875 MHz, below the Linux driver's 70 MHz limit
+* Peak Table window for FFT, Spectrum Stitch and Peaks filters (plot context menu or Window menu): lists the labeled peaks and the next few, sets how many are labeled, highlights a peak on the plot on hover and centers on it on click, and copies as CSV
+* Option to pause acquisition while the window is minimized; while minimized, waveforms aren't rendered and come in no faster than when visible
+* Preference to open the most recent session file at startup (ask, reconnect or offline)
 
 **Minor features and bug fixes**
 
@@ -63,6 +68,23 @@ Our forks of scopehal, logtools, imgui, imgui-node-editor and the manual text ar
 * Fixed 100% CPU use while minimized in Performance mode
 * Fixed the `-L` line buffered log file option on Windows
 * Build: changing `Unit.h` or `ngscopeclient.h` rebuilds fewer files
+* Sessions remember whether the window was maximized, instead of moving a full-screen sized window off the screen
+* Fixed a docked window's saved tab not being selected when the session layout loads
+
+## ADALM-PLUTO calibration (very rough)
+
+Measured on one Pluto, so only a starting point for others: expect a few dB of error, more below 100 MHz. Paste the
+JSON into the calibration box of the channel properties (RX) or the transmit path's properties (TX: double click it
+in the stream browser).
+
+* RX1, the gain in dB (sine into 50 Ω, Pluto reading vs scope):
+  `[[60e6, 10.5], [80e6, 11.2], [130e6, 11.8], [400e6, 12.0]]`
+  The level is corrected at the LO only, so signals far from it in a wide capture read low below about 60 MHz.
+* TX1, dBm of one tone at 100% amplitude and 0 dB gain (loopback through a 20 dB pad into the calibrated RX1):
+  `[[60e6, -2.0], [100e6, 1.9], [190e6, 6.9], [290e6, 8.5], [390e6, 9.1], [490e6, 9.6]]`
+
+Below 70 MHz the Pluto's mixer harmonics aren't filtered, so use a low pass filter there for anything but rough
+levels.
 
 ## TODO
 
