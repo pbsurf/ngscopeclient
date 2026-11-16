@@ -340,6 +340,8 @@ void MainWindow::CloseSession()
 	m_loadDialogs.clear();
 	m_dialogs.clear();
 	m_protocolAnalyzerDialogs.clear();
+	m_peakTableDialogs.clear();
+	m_highlightedPeakFilter = nullptr;
 	m_scpiConsoleDialogs.clear();
 	m_workspaces.clear();
 
@@ -1362,6 +1364,20 @@ void MainWindow::OnDialogClosed(const std::shared_ptr<Dialog>& dlg)
 			m_protocolAnalyzerDialogs.erase(pd);
 	}
 
+	//Same for peak tables, whose filter may have been deleted
+	auto peakDlg = dynamic_pointer_cast<PeakTableDialog>(dlg);
+	if(peakDlg)
+	{
+		for(auto it = m_peakTableDialogs.begin(); it != m_peakTableDialogs.end(); ++it)
+		{
+			if(it->second == peakDlg)
+			{
+				m_peakTableDialogs.erase(it);
+				break;
+			}
+		}
+	}
+
 	//Handle single-instance dialogs
 	if(m_filterPalette == dlg)
 		m_filterPalette = nullptr;
@@ -1856,6 +1872,98 @@ void MainWindow::ShowSdrTxProperties(SDRTransmitChannel* channel)
 	auto dlg = make_shared<SDRTransmitChannelDialog>(channel, this);
 	m_channelPropertiesDialogs[channel] = dlg;
 	AddDialog(dlg);
+}
+
+/**
+	@brief Shows the peak table of a filter, opening it if it isn't already
+ */
+void MainWindow::ShowPeakTable(PeakDetectionFilter* filter)
+{
+	if(m_peakTableDialogs.find(filter) != m_peakTableDialogs.end())
+		return;
+
+	auto dlg = make_shared<PeakTableDialog>(filter, &m_session, this);
+	m_peakTableDialogs[filter] = dlg;
+	AddDialog(dlg);
+}
+
+/**
+	@brief Gets where the peaks labeled on a plot of a filter are (X axis positions of the peaks)
+
+	All plots of a filter label the same number of peaks, but the labels have hysteresis, so they can differ for a
+	moment. This uses the first plot found.
+ */
+set<int64_t> MainWindow::GetPeakLabelPositions(PeakDetectionFilter* filter)
+{
+	set<int64_t> ret;
+
+	lock_guard<recursive_mutex> lock(m_waveformGroupsMutex);
+	for(auto g : m_waveformGroups)
+	{
+		for(auto area : g->GetWaveformAreas())
+		{
+			for(size_t i=0; i<area->GetStreamCount(); i++)
+			{
+				auto chan = area->GetDisplayedChannel(i);
+				if(!chan || (chan->GetStream().m_channel != filter))
+					continue;
+				for(auto& label : chan->m_peakLabels)
+					ret.emplace(label.m_peakXpos);
+				return ret;
+			}
+		}
+	}
+	return ret;
+}
+
+/**
+	@brief Scrolls every plot of a filter so a peak is at the center, without changing the zoom
+ */
+void MainWindow::CenterOnPeak(PeakDetectionFilter* filter, int64_t x)
+{
+	lock_guard<recursive_mutex> lock(m_waveformGroupsMutex);
+	for(auto g : m_waveformGroups)
+	{
+		bool showing = false;
+		for(auto area : g->GetWaveformAreas())
+		{
+			for(size_t i=0; i<area->GetStreamCount(); i++)
+			{
+				if(area->GetStream(i).m_channel == filter)
+					showing = true;
+			}
+		}
+		if(showing)
+			g->CenterOnXAxisValue(x);
+	}
+}
+
+/**
+	@brief Highlights a peak on the plots of a filter
+
+	Called every frame while it should be highlighted (a peak table row is hovered). Dialogs are drawn after the plots,
+	so a highlight set in one frame is drawn in the next.
+ */
+void MainWindow::SetHighlightedPeak(PeakDetectionFilter* filter, int64_t x, float y)
+{
+	m_highlightedPeakFilter = filter;
+	m_highlightedPeakX = x;
+	m_highlightedPeakY = y;
+	m_highlightedPeakFrame = ImGui::GetFrameCount();
+}
+
+/**
+	@brief Gets the highlighted peak of a filter, if there is one
+
+	@return True if a peak of this filter was highlighted this frame or the last one
+ */
+bool MainWindow::GetHighlightedPeak(PeakDetectionFilter* filter, int64_t& x, float& y)
+{
+	if( (filter != m_highlightedPeakFilter) || (ImGui::GetFrameCount() - m_highlightedPeakFrame > 1) )
+		return false;
+	x = m_highlightedPeakX;
+	y = m_highlightedPeakY;
+	return true;
 }
 
 void MainWindow::HideChannelProperties(InstrumentChannel* channel)
@@ -3297,6 +3405,17 @@ bool MainWindow::LoadDialogs(const YAML::Node& node)
 		}
 	}
 
+	auto peaktables = node["peaktables"];
+	if(peaktables && peaktables.IsSequence())
+	{
+		for(auto it : peaktables)
+		{
+			auto f = m_session.m_idtable.Lookup<PeakDetectionFilter>(it.as<intptr_t>());
+			if(f)
+				ShowPeakTable(f);
+		}
+	}
+
 	auto psus = node["psus"];
 	if(psus)
 	{
@@ -3891,6 +4010,15 @@ YAML::Node MainWindow::SerializeDialogs()
 		}
 
 		node["analyzers"] = anode;
+	}
+
+	//Peak tables
+	if(!m_peakTableDialogs.empty())
+	{
+		YAML::Node pnode;
+		for(auto it : m_peakTableDialogs)
+			pnode.push_back(m_session.m_idtable.emplace(it.first));
+		node["peaktables"] = pnode;
 	}
 
 

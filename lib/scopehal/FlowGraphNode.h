@@ -176,6 +176,15 @@ public:
 
 	virtual void Refresh(vk::raii::CommandBuffer& cmdBuf, std::shared_ptr<QueueHandle> queue) =0;
 
+	/**
+		@brief Returns true if this node reads the peak list of its upstream PeakDetector
+
+		A PeakDetectionFilter runs its peak search when at least one of its sinks returns true here,
+		even if it isn't displaying any peaks itself. Sinks can be filters or UI (such as a peak table).
+	 */
+	virtual bool ConsumesUpstreamPeaks()
+	{ return false; }
+
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Error detection and reporting
 public:

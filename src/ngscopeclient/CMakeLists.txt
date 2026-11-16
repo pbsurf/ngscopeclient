@@ -110,6 +110,7 @@ add_executable(ngscopeclient
 	PacketManager.cpp
 	PowerSupplyDialog.cpp
 	Preference.cpp
+	PeakTableDialog.cpp
 	PreferenceDialog.cpp
 	PreferenceManager.cpp
 	PreferenceSchema.cpp

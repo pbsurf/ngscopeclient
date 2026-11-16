@@ -1313,6 +1313,29 @@ void WaveformArea::PlotContextMenu()
 				ImGui::EndMenu();
 			}
 
+			//Peak tables for the streams that have peaks
+			vector<PeakDetectionFilter*> peakFilters;
+			for(size_t i=0; i<m_inputs.size(); i++)
+			{
+				auto pf = dynamic_cast<PeakDetectionFilter*>(GetStream(i).m_channel);
+				if(pf && (find(peakFilters.begin(), peakFilters.end(), pf) == peakFilters.end()))
+					peakFilters.push_back(pf);
+			}
+			if(peakFilters.size() == 1)
+			{
+				if(ImGui::MenuItem("Peak Table"))
+					m_parent->ShowPeakTable(peakFilters[0]);
+			}
+			else if(!peakFilters.empty() && ImGui::BeginMenu("Peak Table"))
+			{
+				for(auto pf : peakFilters)
+				{
+					if(ImGui::MenuItem(pf->GetDisplayName().c_str()))
+						m_parent->ShowPeakTable(pf);
+				}
+				ImGui::EndMenu();
+			}
+
 			if(ImGui::MenuItem("Add Marker"))
 			{
 				auto& session = m_parent->GetSession();
@@ -1900,6 +1923,19 @@ void WaveformArea::RenderSpectrumPeaks(ImDrawList* list, shared_ptr<DisplayedCha
 			circleColor,
 			0,
 			1);
+	}
+
+	//And the peak highlighted in a peak table, labeled or not
+	int64_t hx;
+	float hy;
+	if(m_parent->GetHighlightedPeak(pf, hx, hy))
+	{
+		list->AddCircle(
+			ImVec2(m_group->XAxisUnitsToXPosition(hx), YAxisUnitsToYPosition(hy)),
+			radius * 1.75f,
+			ColorFromString("#ffff00ff"),
+			0,
+			3);
 	}
 
 	auto font = m_parent->GetFontPref("Appearance.Peaks.label_font");

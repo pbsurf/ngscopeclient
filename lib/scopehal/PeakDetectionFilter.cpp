@@ -74,8 +74,7 @@ bool PeakDetectionFilter::HasPeakConsumer()
 	{
 		for(auto node : sinks)
 		{
-			auto f = dynamic_cast<Filter*>(node);
-			if(f && f->ConsumesUpstreamPeaks())
+			if(node->ConsumesUpstreamPeaks())
 				return true;
 		}
 	}

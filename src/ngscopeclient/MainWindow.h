@@ -45,6 +45,7 @@
 #include "FilterGraphEditor.h"
 #include "ManageInstrumentsDialog.h"
 #include "ProtocolAnalyzerDialog.h"
+#include "PeakTableDialog.h"
 #include "StreamBrowserDialog.h"
 #include "TriggerPropertiesDialog.h"
 #include "TutorialWizard.h"
@@ -198,6 +199,13 @@ public:
 
 	void ShowChannelProperties(OscilloscopeChannel* channel);
 	void ShowSdrTxProperties(SDRTransmitChannel* channel);
+
+	//Peak tables, and what they need from the plots
+	void ShowPeakTable(PeakDetectionFilter* filter);
+	std::set<int64_t> GetPeakLabelPositions(PeakDetectionFilter* filter);
+	void CenterOnPeak(PeakDetectionFilter* filter, int64_t x);
+	void SetHighlightedPeak(PeakDetectionFilter* filter, int64_t x, float y);
+	bool GetHighlightedPeak(PeakDetectionFilter* filter, int64_t& x, float& y);
 	void HideChannelProperties(InstrumentChannel* channel);
 	void ShowInstrumentProperties(std::shared_ptr<Instrument> instrument);
 	void ShowTriggerProperties();
@@ -352,6 +360,7 @@ protected:
 			void SetupMenu();
 			void WindowMenu();
 				void WindowAnalyzerMenu();
+				void WindowPeakTableMenu();
 				void WindowPSUMenu();
 			void DebugMenu();
 				void DebugSCPIConsoleMenu();
@@ -420,6 +429,15 @@ protected:
 
 	///@brief Map of filters to analyzer dialogs
 	std::map<PacketDecoder*, std::shared_ptr<ProtocolAnalyzerDialog> > m_protocolAnalyzerDialogs;
+
+	///@brief Map of filters to peak table dialogs
+	std::map<PeakDetectionFilter*, std::shared_ptr<PeakTableDialog> > m_peakTableDialogs;
+
+	///@brief Peak highlighted from a peak table (see SetHighlightedPeak())
+	PeakDetectionFilter* m_highlightedPeakFilter = nullptr;
+	int64_t m_highlightedPeakX = 0;
+	float m_highlightedPeakY = 0;
+	int m_highlightedPeakFrame = -10;
 
 	///@brief Waveform groups
 	std::vector<std::shared_ptr<WaveformGroup> > m_waveformGroups;

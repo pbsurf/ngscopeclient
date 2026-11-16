@@ -638,6 +638,7 @@ void MainWindow::WindowMenu()
 	if(ImGui::BeginMenu("Window"))
 	{
 		WindowAnalyzerMenu();
+		WindowPeakTableMenu();
 		WindowPSUMenu();
 
 		bool hasLabNotes = m_notesDialog != nullptr;
@@ -774,6 +775,35 @@ void MainWindow::WindowAnalyzerMenu()
 	}
 
 	if(decoders.empty())
+		ImGui::EndDisabled();
+}
+
+/**
+	@brief Run the Window | Peak Table menu, listing the filters that find peaks (FFT, Spectrum Stitch, Peaks, etc)
+ */
+void MainWindow::WindowPeakTableMenu()
+{
+	vector<PeakDetectionFilter*> filters;
+	for(auto f : Filter::GetAllInstances())
+	{
+		auto pf = dynamic_cast<PeakDetectionFilter*>(f);
+		if(pf)
+			filters.push_back(pf);
+	}
+
+	if(filters.empty())
+		ImGui::BeginDisabled();
+	if(ImGui::BeginMenu("Peak Table"))
+	{
+		for(auto pf : filters)
+		{
+			bool open = (m_peakTableDialogs.find(pf) != m_peakTableDialogs.end());
+			if(ImGui::MenuItem(pf->GetDisplayName().c_str(), nullptr, false, !open))
+				ShowPeakTable(pf);
+		}
+		ImGui::EndMenu();
+	}
+	if(filters.empty())
 		ImGui::EndDisabled();
 }
 
