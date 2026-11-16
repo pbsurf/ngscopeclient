@@ -154,6 +154,7 @@ public:
 	virtual float GetTxAttenuation(size_t tx) override;
 	virtual void SetTxAttenuation(size_t tx, float atten) override;
 	virtual std::pair<float, float> GetTxAttenuationRange(size_t tx) override;
+	virtual float GetTxAttenuationStep(size_t tx) override;
 	virtual float GetTxToneAmplitude(size_t tx, size_t tone) override;
 	virtual void SetTxToneAmplitude(size_t tx, size_t tone, float amplitude) override;
 

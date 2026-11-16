@@ -383,7 +383,7 @@ static bool ParseCalFrequency(const string& str, double& freq)
 }
 
 /**
-	@brief Parses a gain in dB, optionally followed by "dB"
+	@brief Parses a gain in dB, optionally followed by "dB" (or "dBm")
 
 	@return True if the whole string was a gain
  */
@@ -398,7 +398,13 @@ static bool ParseCalGain(const string& str, float& gain)
 	while(isspace(static_cast<unsigned char>(*end)))
 		end++;
 	if( (tolower(end[0]) == 'd') && (tolower(end[1]) == 'b') )
+	{
 		end += 2;
+
+		//dBm too, for transmit calibration (which is a level rather than a gain)
+		if(tolower(end[0]) == 'm')
+			end++;
+	}
 	while(isspace(static_cast<unsigned char>(*end)))
 		end++;
 
@@ -580,11 +586,20 @@ bool SCPISDR::IsCalibrationJson(const string& cal)
 	return (first != string::npos) && ( (cal[first] == '{') || (cal[first] == '[') );
 }
 
-bool SCPISDR::SetCalibrationFile(size_t i, const string& path)
+/**
+	@brief Loads calibration points from a file or inline JSON (see SCPISDR::SetCalibrationFile() for the formats)
+
+	@param path		Path of the file, JSON calibration data, or an empty string for no calibration
+	@param what		What the calibration is for, for log messages (for example "SDR calibration")
+	@param points	Receives the points, sorted by frequency (empty if there was an error)
+
+	@return An empty string if it worked (or path is empty), otherwise why it didn't
+ */
+static string LoadCalibration(const string& path, const char* what, vector<pair<double, float> >& points)
 {
-	vector<pair<double, float> > points;
+	points.clear();
 	string err;
-	bool inlineJson = IsCalibrationJson(path);
+	bool inlineJson = SCPISDR::IsCalibrationJson(path);
 	if(inlineJson)
 		err = ParseJsonCalibration(path, points);
 	else if(!path.empty())
@@ -624,13 +639,43 @@ bool SCPISDR::SetCalibrationFile(size_t i, const string& path)
 		if(!err.empty())
 		{
 			if(inlineJson)
-				LogWarning("Could not load SDR calibration JSON: %s\n", err.c_str());
+				LogWarning("Could not load %s JSON: %s\n", what, err.c_str());
 			else
-				LogWarning("Could not load SDR calibration file %s: %s\n", path.c_str(), err.c_str());
+				LogWarning("Could not load %s file %s: %s\n", what, path.c_str(), err.c_str());
 			points.clear();
 		}
 	}
 	sort(points.begin(), points.end());
+	return err;
+}
+
+/**
+	@brief Interpolates calibration points linearly, flat beyond the ends
+
+	@return The value at freq, or zero if there are no points
+ */
+static float InterpolateCalibration(const vector<pair<double, float> >& points, double f)
+{
+	if(points.empty())
+		return 0;
+
+	//Flat beyond the ends
+	if(f <= points.front().first)
+		return points.front().second;
+	if(f >= points.back().first)
+		return points.back().second;
+
+	//Linear interpolation between the points on either side
+	auto hi = lower_bound(points.begin(), points.end(), pair<double, float>(f, -INFINITY));
+	auto lo = hi - 1;
+	double frac = (f - lo->first) / (hi->first - lo->first);
+	return lo->second + frac * (hi->second - lo->second);
+}
+
+bool SCPISDR::SetCalibrationFile(size_t i, const string& path)
+{
+	vector<pair<double, float> > points;
+	auto err = LoadCalibration(path, "SDR calibration", points);
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	auto& lc = m_levelCorrection[i];
@@ -643,22 +688,7 @@ bool SCPISDR::SetCalibrationFile(size_t i, const string& path)
 float SCPISDR::GetCalibrationGain(size_t i, int64_t freq)
 {
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	auto& points = m_levelCorrection[i].m_calPoints;
-	if(points.empty())
-		return 0;
-
-	//Flat beyond the ends
-	double f = freq;
-	if(f <= points.front().first)
-		return points.front().second;
-	if(f >= points.back().first)
-		return points.back().second;
-
-	//Linear interpolation between the points on either side
-	auto hi = lower_bound(points.begin(), points.end(), pair<double, float>(f, -INFINITY));
-	auto lo = hi - 1;
-	double frac = (f - lo->first) / (hi->first - lo->first);
-	return lo->second + frac * (hi->second - lo->second);
+	return InterpolateCalibration(m_levelCorrection[i].m_calPoints, freq);
 }
 
 float SCPISDR::GetInputGain(size_t i, int64_t freq, float rxGain)
@@ -760,6 +790,11 @@ pair<float, float> SCPISDR::GetTxAttenuationRange(size_t /*tx*/)
 	return pair<float, float>(0, 0);
 }
 
+float SCPISDR::GetTxAttenuationStep(size_t /*tx*/)
+{
+	return 0;
+}
+
 float SCPISDR::GetTxToneAmplitude(size_t /*tx*/, size_t /*tone*/)
 {
 	return 0;
@@ -768,6 +803,178 @@ float SCPISDR::GetTxToneAmplitude(size_t /*tx*/, size_t /*tone*/)
 void SCPISDR::SetTxToneAmplitude(size_t /*tx*/, size_t /*tone*/, float /*amplitude*/)
 {
 	//no-op
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Transmit level
+
+//Tones adding up to more than full scale clip
+static const float g_txMaxTotalAmplitude = 1.0f;
+
+//-30 dBFS: below this, quantization and LO leakage start to matter
+static const float g_txMinToneAmplitude = 0.0316f;
+
+float SCPISDR::GetTxMaxTotalAmplitude()
+{
+	return g_txMaxTotalAmplitude;
+}
+
+float SCPISDR::GetTxMinToneAmplitude()
+{
+	return g_txMinToneAmplitude;
+}
+
+float SCPISDR::GetTxExternalGain(size_t tx)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txLevelCorrection[tx].m_externalGain;
+}
+
+void SCPISDR::SetTxExternalGain(size_t tx, float gain)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	m_txLevelCorrection[tx].m_externalGain = gain;
+}
+
+string SCPISDR::GetTxCalibrationFile(size_t tx)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txLevelCorrection[tx].m_calFile;
+}
+
+string SCPISDR::GetTxCalibrationError(size_t tx)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return m_txLevelCorrection[tx].m_calError;
+}
+
+bool SCPISDR::SetTxCalibrationFile(size_t tx, const string& path)
+{
+	vector<pair<double, float> > points;
+	auto err = LoadCalibration(path, "SDR transmit calibration", points);
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	auto& lc = m_txLevelCorrection[tx];
+	lc.m_calFile = path;
+	lc.m_calError = err;
+	lc.m_calPoints = points;
+	return err.empty();
+}
+
+bool SCPISDR::HasTxCalibration(size_t tx)
+{
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	return !m_txLevelCorrection[tx].m_calPoints.empty();
+}
+
+float SCPISDR::GetTxToneFullScaleLevel(size_t tx, size_t tone)
+{
+	//The driver methods take their own locks, so don't hold ours across them
+	double freq = static_cast<double>(GetTxLOFrequency()) + GetTxToneFrequency(tx, tone);
+
+	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	auto& lc = m_txLevelCorrection[tx];
+	return InterpolateCalibration(lc.m_calPoints, freq) + lc.m_externalGain;
+}
+
+float SCPISDR::GetTxToneLevel(size_t tx, size_t tone)
+{
+	if(tone >= GetTxToneCount(tx))
+		return -INFINITY;
+	float amplitude = GetTxToneAmplitude(tx, tone);
+	if(amplitude <= 0)
+		return -INFINITY;
+	return GetTxToneFullScaleLevel(tx, tone) + 20 * log10(amplitude) - GetTxAttenuation(tx);
+}
+
+/**
+	@brief Rounds an attenuation to a step (no rounding if the step is zero), down or up
+
+	A little slack keeps values that are already on a step (give or take float error) where they are.
+ */
+static double RoundAttenuation(double atten, double step, bool up)
+{
+	if(step <= 0)
+		return atten;
+	double n = atten / step;
+	return step * (up ? ceil(n - 1e-6) : floor(n + 1e-6));
+}
+
+void SCPISDR::SetTxToneLevel(size_t tx, size_t tone, float level)
+{
+	size_t ntones = GetTxToneCount(tx);
+	if(tone >= ntones)
+		return;
+
+	if(isnan(level) || isinf(level))
+	{
+		if(level > 0)
+			level = FLT_MAX;
+		else
+		{
+			SetTxToneAmplitude(tx, tone, 0);
+			return;
+		}
+	}
+
+	//Wanted level of each tone relative to its level at full scale with no attenuation (minus infinity if off).
+	//The other tones keep the levels they have now.
+	double atten = GetTxAttenuation(tx);
+	vector<double> rel(ntones, -INFINITY);
+	for(size_t j=0; j<ntones; j++)
+	{
+		if(j == tone)
+			rel[j] = level - GetTxToneFullScaleLevel(tx, j);
+		else
+		{
+			float a = GetTxToneAmplitude(tx, j);
+			if(a > 0)
+				rel[j] = 20 * log10(a) - atten;
+		}
+	}
+
+	//Most attenuation without clipping (amplitude is 10^((rel + atten)/20), and they mustn't add up to too much), and
+	//the least that keeps this tone loud enough
+	double sum = 0;
+	for(auto r : rel)
+	{
+		if(isfinite(r))
+			sum += pow(10, r / 20);
+	}
+	double hiAtten = 20 * log10(g_txMaxTotalAmplitude / sum);
+	double loAtten = 20 * log10(g_txMinToneAmplitude) - rel[tone];
+
+	//Keep the attenuation if it's between the two, otherwise move it as little as possible. Clipping wins.
+	double step = GetTxAttenuationStep(tx);
+	double newAtten = atten;
+	if( (atten > hiAtten) || (loAtten > hiAtten) )
+		newAtten = RoundAttenuation(hiAtten, step, false);
+	else if(atten < loAtten)
+		newAtten = min(RoundAttenuation(loAtten, step, true), RoundAttenuation(hiAtten, step, false));
+
+	//It may not get there
+	auto range = GetTxAttenuationRange(tx);
+	newAtten = min(max(newAtten, static_cast<double>(range.first)), static_cast<double>(range.second));
+
+	//Other tones keep their levels if the attenuation moved, and this tone gets what's left if it would still clip
+	//(the level is more than the radio can do)
+	bool moved = (newAtten != atten);
+	if(moved)
+		SetTxAttenuation(tx, newAtten);
+	double others = 0;
+	for(size_t j=0; j<ntones; j++)
+	{
+		if( (j == tone) || !isfinite(rel[j]) )
+			continue;
+		double a = min(pow(10, (rel[j] + newAtten) / 20), 1.0);
+		others += a;
+		if(moved)
+			SetTxToneAmplitude(tx, j, a);
+	}
+	double a = pow(10, (rel[tone] + newAtten) / 20);
+	a = min(a, g_txMaxTotalAmplitude - others);
+	a = min(max(a, 0.0), 1.0);
+	SetTxToneAmplitude(tx, tone, a);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -791,6 +998,8 @@ void SCPISDR::DoSerializeConfiguration(YAML::Node& node, IDTable& /*table*/)
 		{
 			YAML::Node txnode;
 			txnode["attenuation"] = GetTxAttenuation(i);
+			txnode["externalgain"] = GetTxExternalGain(i);
+			txnode["calfile"] = GetTxCalibrationFile(i);
 			for(size_t j=0; j<GetTxToneCount(i); j++)
 			{
 				YAML::Node tone;
@@ -859,6 +1068,10 @@ void SCPISDR::DoLoadConfiguration(int /*version*/, const YAML::Node& node, IDTab
 
 			if(txnode["attenuation"])
 				SetTxAttenuation(i, txnode["attenuation"].as<float>());
+			if(txnode["externalgain"])
+				SetTxExternalGain(i, txnode["externalgain"].as<float>());
+			if(txnode["calfile"])
+				SetTxCalibrationFile(i, txnode["calfile"].as<string>());
 
 			for(size_t j=0; j<GetTxToneCount(i); j++)
 			{

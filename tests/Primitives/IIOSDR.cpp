@@ -1656,6 +1656,161 @@ TEST_CASE("IIOSDR_TransmitSessionRoundTrip")
 }
 
 /**
+	@brief Checks that an attenuation is a whole number of 0.25 dB steps
+ */
+static bool OnAttenuationStep(float atten)
+{
+	return fabs(atten * 4 - round(atten * 4)) < 1e-4;
+}
+
+TEST_CASE("IIOSDR_TransmitLevel")
+{
+	IIOContext* ctx;
+	auto sdr = MakeSDR("mock:ad9361", ctx);
+
+	//The mock starts at 10 dB attenuation with tone 1 at 25% (-12.04 dBFS) and tone 2 off
+	REQUIRE(sdr->GetTxAttenuationStep(0) == 0.25f);
+	REQUIRE_FALSE(sdr->HasTxCalibration(0));
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-22.04).margin(0.01));
+	REQUIRE(sdr->GetTxToneLevel(0, 1) == -INFINITY);
+
+	//Calibration is interpolated at the RF frequency of each tone (LO 2.4 GHz plus the tone)
+	TempFile cal("txcal.csv", "# freq, level\n2.3 GHz, 0 dBm\n2.5 GHz, 10 dBm\n");
+	REQUIRE(sdr->SetTxCalibrationFile(0, cal.m_path));
+	REQUIRE(sdr->GetTxCalibrationError(0) == "");
+	REQUIRE(sdr->HasTxCalibration(0));
+	REQUIRE_FALSE(sdr->HasTxCalibration(1));
+	REQUIRE(sdr->GetTxToneFullScaleLevel(0, 0) == Catch::Approx(5.05).margin(1e-3));
+	sdr->SetTxToneFrequency(0, 1, -1000000);
+	REQUIRE(sdr->GetTxToneFullScaleLevel(0, 1) == Catch::Approx(4.95).margin(1e-3));
+
+	//External gain adds on, and changes the level without changing the settings
+	sdr->SetTxExternalGain(0, -3);
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(5.05 - 3 - 12.04 - 10).margin(0.01));
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) == Catch::Approx(0.25));
+	REQUIRE(sdr->GetTxAttenuation(0) == 10);
+
+	//Use a flat calibration from here on, so the numbers are easy: 2 dBm at full scale after the external gain
+	REQUIRE(sdr->SetTxCalibrationFile(0, "[[1e9, 5], [3e9, 5]]"));
+
+	//A level that fits only changes the amplitude
+	sdr->SetTxToneLevel(0, 0, -30);
+	REQUIRE(sdr->GetTxAttenuation(0) == 10);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) == Catch::Approx(pow(10, -22.0 / 20)).margin(1e-4));
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-30).margin(0.01));
+
+	//Too loud for the amplitude: the attenuation comes down instead
+	sdr->SetTxToneLevel(0, 0, 1);
+	REQUIRE(sdr->GetTxAttenuation(0) == 1);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) == Catch::Approx(1));
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(1).margin(0.01));
+
+	//Two tones that fit together at the current attenuation don't move it
+	sdr->SetTxToneLevel(0, 0, -10);
+	sdr->SetTxToneLevel(0, 1, -10);
+	REQUIRE(sdr->GetTxAttenuation(0) == 1);
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-10).margin(0.01));
+	REQUIRE(sdr->GetTxToneLevel(0, 1) == Catch::Approx(-10).margin(0.01));
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) + sdr->GetTxToneAmplitude(0, 1) <= 1.0001f);
+
+	//Too quiet, but more attenuation would clip the other tone: clipping wins, the attenuation is as high as it can be
+	sdr->SetTxToneLevel(0, 1, -40);
+	REQUIRE(sdr->GetTxAttenuation(0) == 11.5);
+	REQUIRE(sdr->GetTxToneLevel(0, 1) == Catch::Approx(-40).margin(0.01));
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-10).margin(0.01));
+	REQUIRE(sdr->GetTxToneAmplitude(0, 1) < SCPISDR::GetTxMinToneAmplitude());
+
+	//Too quiet with room to spare: the attenuation goes up just enough, the other tone keeps its level
+	sdr->SetTxToneLevel(0, 0, -40);
+	REQUIRE(sdr->GetTxAttenuation(0) == 12);
+	sdr->SetTxToneLevel(0, 1, -60);
+	float atten = sdr->GetTxAttenuation(0);
+	REQUIRE(atten == 32);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 1) >= SCPISDR::GetTxMinToneAmplitude());
+	REQUIRE(sdr->GetTxToneLevel(0, 1) == Catch::Approx(-60).margin(0.01));
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-40).margin(0.01));
+
+	//Too loud: the attenuation comes down to a step, and the quiet tone keeps its level below the minimum amplitude
+	sdr->SetTxToneLevel(0, 0, -5);
+	REQUIRE(OnAttenuationStep(sdr->GetTxAttenuation(0)));
+	REQUIRE(sdr->GetTxAttenuation(0) == 6.75);
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-5).margin(0.01));
+	REQUIRE(sdr->GetTxToneLevel(0, 1) == Catch::Approx(-60).margin(0.01));
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) + sdr->GetTxToneAmplitude(0, 1) <= 1.0001f);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 1) < SCPISDR::GetTxMinToneAmplitude());
+
+	//More than the radio can do: no attenuation, and this tone gets what the other leaves
+	sdr->SetTxToneLevel(0, 0, 20);
+	REQUIRE(sdr->GetTxAttenuation(0) == 0);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) + sdr->GetTxToneAmplitude(0, 1) == Catch::Approx(1).margin(1e-4));
+	REQUIRE(sdr->GetTxToneLevel(0, 1) == Catch::Approx(-60).margin(0.01));
+
+	//Less than the radio can do: all the attenuation
+	sdr->SetTxToneAmplitude(0, 1, 0);
+	sdr->SetTxToneLevel(0, 0, -200);
+	REQUIRE(sdr->GetTxAttenuation(0) == 89.75f);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) > 0);
+
+	//Minus infinity or NaN turn the tone off and leave the rest alone
+	sdr->SetTxToneLevel(0, 0, -20);
+	atten = sdr->GetTxAttenuation(0);
+	sdr->SetTxToneLevel(0, 0, -INFINITY);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 0) == 0);
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == -INFINITY);
+	REQUIRE(sdr->GetTxAttenuation(0) == atten);
+	sdr->SetTxToneLevel(0, 1, NAN);
+	REQUIRE(sdr->GetTxToneAmplitude(0, 1) == 0);
+
+	//It all reaches the radio
+	sdr->SetTxToneLevel(0, 0, -20);
+	sdr->BackgroundProcessing();
+	double gain;
+	REQUIRE(ctx->ReadChannelAttrDouble(phy, "voltage0", true, "hardwaregain", gain));
+	REQUIRE(gain == -sdr->GetTxAttenuation(0));
+	REQUIRE(sdr->GetTxToneLevel(0, 0) == Catch::Approx(-20).margin(0.01));
+
+	//The other path wasn't touched
+	REQUIRE(sdr->GetTxAttenuation(1) == 10);
+
+	//Bad indexes are ignored
+	sdr->SetTxToneLevel(0, 2, 0);
+	sdr->SetTxToneLevel(2, 0, 0);
+	REQUIRE(sdr->GetTxToneLevel(0, 2) == -INFINITY);
+
+	//Bad file
+	REQUIRE_FALSE(sdr->SetTxCalibrationFile(1, "[[1e9]]"));
+	REQUIRE(sdr->GetTxCalibrationError(1) != "");
+	REQUIRE_FALSE(sdr->HasTxCalibration(1));
+}
+
+TEST_CASE("IIOSDR_TransmitLevelSessionRoundTrip")
+{
+	IIOContext* ctx;
+	auto sdr = MakeSDR("mock:ad9361", ctx);
+	string json = "[[1e9, 5], [3e9, 7]]";
+	REQUIRE(sdr->SetTxCalibrationFile(1, json));
+	sdr->SetTxExternalGain(1, -20);
+	sdr->SetTxToneLevel(1, 0, -50);
+	sdr->BackgroundProcessing();
+	float level = sdr->GetTxToneLevel(1, 0);
+
+	IDTable table;
+	auto node = sdr->SerializeConfiguration(table);
+
+	IIOContext* ctx2;
+	auto sdr2 = MakeSDR("mock:ad9361", ctx2);
+	IDTable idmap;
+	sdr2->LoadConfiguration(2, node, idmap);
+	sdr2->BackgroundProcessing();
+
+	REQUIRE(sdr2->GetTxCalibrationFile(0) == "");
+	REQUIRE(sdr2->GetTxExternalGain(0) == 0);
+	REQUIRE(sdr2->GetTxCalibrationFile(1) == json);
+	REQUIRE(sdr2->GetTxExternalGain(1) == -20);
+	REQUIRE(sdr2->GetTxToneLevel(1, 0) == Catch::Approx(level).margin(0.01));
+}
+
+/**
 	@brief Gets the RMS of a complex baseband signal, per rail
  */
 static double RmsPerRail(WaveformBase* iw, WaveformBase* qw)

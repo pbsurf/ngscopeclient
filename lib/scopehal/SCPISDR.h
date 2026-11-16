@@ -272,11 +272,90 @@ public:
 	///@brief Gets the range of allowed transmit attenuation values, in dB, as (min, max)
 	virtual std::pair<float, float> GetTxAttenuationRange(size_t tx);
 
+	///@brief Gets the step the radio rounds transmit attenuation to, in dB (zero if it's continuous or unknown)
+	virtual float GetTxAttenuationStep(size_t tx);
+
 	///@brief Gets the amplitude of a tone, as a fraction of full scale (0 to 1)
 	virtual float GetTxToneAmplitude(size_t tx, size_t tone);
 
 	///@brief Sets the amplitude of a tone, as a fraction of full scale (0 to 1)
 	virtual void SetTxToneAmplitude(size_t tx, size_t tone, float amplitude);
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Transmit level
+	//
+	// Entirely client side, built on the transmit control methods above, so drivers don't need to do anything.
+	//
+	// Each transmit path can have a calibration: the level (in dBm) of a single tone at full scale with no
+	// attenuation, against RF frequency. The level of a tone is then
+	//
+	//   calibration(LO + tone frequency) + external gain + 20 log10(amplitude) - attenuation
+	//
+	// With no calibration it's the same with the calibration taken as zero, so a level in dB relative to a full scale
+	// tone with no attenuation.
+	//
+	// Attenuation and amplitudes stay the actual settings (they're what's saved in sessions); the level is another way
+	// of looking at them. All tones of a path share the attenuation, so setting the level of one may move the
+	// attenuation and the amplitudes of the others (keeping their levels), see SetTxToneLevel().
+
+	///@brief Gets the gain of whatever is after the output of transmit path tx (negative for attenuation), in dB
+	float GetTxExternalGain(size_t tx);
+
+	///@brief Sets the gain of whatever is after the output of transmit path tx, in dB. The settings don't change.
+	void SetTxExternalGain(size_t tx, float gain);
+
+	/**
+		@brief Gets the calibration of transmit path tx as it was set: the path of the file, the calibration itself
+		as JSON, or an empty string if there isn't one
+	 */
+	std::string GetTxCalibrationFile(size_t tx);
+
+	/**
+		@brief Loads the calibration file of transmit path tx
+
+		Same formats as SetCalibrationFile(), with the "gain" of each point being the level in dBm of a single full
+		scale tone with no attenuation at that frequency ("dBm" is allowed after the value in text files).
+
+		@return			True if the file was loaded. If it couldn't be, there is no calibration, and
+						GetTxCalibrationError() says why.
+	 */
+	bool SetTxCalibrationFile(size_t tx, const std::string& path);
+
+	///@brief Gets the reason the calibration of transmit path tx couldn't be loaded, or an empty string if it was
+	std::string GetTxCalibrationError(size_t tx);
+
+	///@brief Returns true if transmit path tx has a calibration loaded, so tone levels are in dBm
+	bool HasTxCalibration(size_t tx);
+
+	/**
+		@brief Gets the level a tone would have at full scale with no attenuation, in dBm: the calibration at its RF
+		frequency (TX LO plus tone frequency), plus the external gain
+	 */
+	float GetTxToneFullScaleLevel(size_t tx, size_t tone);
+
+	///@brief Gets the level of a tone at the output, in dBm (dB relative to full scale if there's no calibration)
+	float GetTxToneLevel(size_t tx, size_t tone);
+
+	/**
+		@brief Sets the level of a tone at the output, in dBm (dB relative to full scale if there's no calibration)
+
+		The attenuation is left alone if possible, and only the amplitude of this tone changes. The attenuation moves
+		(to a multiple of GetTxAttenuationStep()), with the amplitudes of the other tones changed to keep their
+		levels, if this tone would otherwise
+
+		- clip: the amplitudes of all the tones would add up to more than full scale, or
+		- be too quiet: an amplitude below GetTxMinToneAmplitude(), where it's not accurate any more.
+
+		Clipping wins if both can't be avoided (the tones are too far apart). Levels the radio can't reach are as close
+		as it gets. NaN or minus infinity turns the tone off (zero amplitude).
+	 */
+	void SetTxToneLevel(size_t tx, size_t tone, float level);
+
+	///@brief The most the amplitudes of the tones of a transmit path add up to when levels are set
+	static float GetTxMaxTotalAmplitude();
+
+	///@brief The lowest amplitude a tone is given when its level is set, unless that would clip another tone
+	static float GetTxMinToneAmplitude();
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Configuration storage
@@ -329,6 +408,13 @@ protected:
 
 	///@brief Level correction settings, indexed by channel. Protected by m_cacheMutex
 	std::map<size_t, LevelCorrection> m_levelCorrection;
+
+	/**
+		@brief Transmit level settings, indexed by transmit path. Protected by m_cacheMutex
+
+		The external gain is after the output, and the calibration points are levels in dBm rather than gains.
+	 */
+	std::map<size_t, LevelCorrection> m_txLevelCorrection;
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Dynamic creation

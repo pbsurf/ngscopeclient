@@ -1313,6 +1313,12 @@ pair<float, float> IIOSDR::GetTxAttenuationRange(size_t /*tx*/)
 	return pair<float, float>(m_txMinAtten, m_txMaxAtten);
 }
 
+float IIOSDR::GetTxAttenuationStep(size_t /*tx*/)
+{
+	//AD936x transmit attenuation is in 0.25 dB steps
+	return 0.25;
+}
+
 float IIOSDR::GetTxToneAmplitude(size_t tx, size_t tone)
 {
 	if( (tx >= m_numTx) || (tone >= m_numTones) )
