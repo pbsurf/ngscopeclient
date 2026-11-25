@@ -41,7 +41,8 @@ enum class SCPITransportType
 	TRANSPORT_VICP,
 	TRANSPORT_SOCKETCAN,
 	TRANSPORT_LXI,
-	TRANSPORT_IIO
+	TRANSPORT_IIO,
+	TRANSPORT_PICO
 };
 
 ///@brief Converts the enumerated ID of a SCPITransportType to the text name

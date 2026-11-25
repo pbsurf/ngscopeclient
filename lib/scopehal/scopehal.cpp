@@ -126,6 +126,7 @@
 #include "SCPIHIDTransport.h"
 #include "SCPIIIOTransport.h"
 #include "SCPILoad.h"
+#include "SCPIPicoTransport.h"
 #include "SCPILxiTransport.h"
 #include "SCPIMiscInstrument.h"
 #include "SCPIMultimeter.h"
@@ -274,6 +275,10 @@ void TransportStaticInit()
 
 #ifdef HAS_IIO
 	AddTransportClass(SCPIIIOTransport);
+#endif
+
+#ifdef HAS_PICO
+	AddTransportClass(SCPIPicoTransport);
 #endif
 }
 

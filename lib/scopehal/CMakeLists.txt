@@ -101,6 +101,7 @@ set(SCOPEHAL_SOURCES
 	IIOLibContext.cpp
 	IIOMockContext.cpp
 	IIOSDR.cpp
+	SCPIPicoTransport.cpp
 	SCPIDevice.cpp
 
 	IBISParser.cpp
@@ -314,6 +315,11 @@ if(IIO_FOUND)
 		PkgConfig::IIO
 	)
 	target_compile_definitions(scopehal PUBLIC HAS_IIO)
+endif()
+
+# Built in Pico bridge (lib/picobridge), if the Pico SDK headers were found. Brings HAS_PICO with it.
+if(TARGET picobridge)
+	target_link_libraries(scopehal picobridge)
 endif()
 
 target_include_directories(scopehal

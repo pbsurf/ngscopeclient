@@ -305,9 +305,26 @@ protected:
 	///@brief Waveforms actively being downloaded and processed but not ready to push to the filter graph yet
 	SequenceSet m_wipWaveforms;
 
+	bool IsWaveformDataAvailable();
+
 public:
 
 	static std::string GetDriverNameInternal();
+
+	//This is intentionally not virtual since it's a static method used by enumeration
+	//cppcheck-suppress duplInheritedMember
+	static std::vector<SCPIInstrumentModel> GetDriverSupportedModels()
+	{
+		return {
+			{"PicoScope", {
+#ifdef HAS_PICO
+				{ SCPITransportType::TRANSPORT_PICO, "" },
+#endif
+				{ SCPITransportType::TRANSPORT_TWINLAN, "localhost:5025:5026" }
+			}}
+		};
+	}
+
 	OSCILLOSCOPE_INITPROC(PicoOscilloscope)
 };
 

@@ -36,6 +36,7 @@
 #include "PicoOscilloscope.h"
 #include "EdgeTrigger.h"
 #include "SCPITwinLanTransport.h"
+#include "SCPIPicoTransport.h"
 
 using namespace std;
 
@@ -768,7 +769,7 @@ Oscilloscope::TriggerMode PicoOscilloscope::PollTrigger()
 		return TRIGGER_MODE_STOP;
 
 	//See if we have data ready
-	if(dynamic_cast<SCPITwinLanTransport*>(m_transport)->GetSecondarySocket().GetRxBytesAvailable() > 0)
+	if(IsWaveformDataAvailable())
 	{
 		#ifdef HAVE_NVTX
 			nvtxMark("PollTrigger");
@@ -789,6 +790,26 @@ Oscilloscope::TriggerMode PicoOscilloscope::PollTrigger()
 
 	else
 		return TRIGGER_MODE_RUN;
+}
+
+/**
+	@brief Returns true if the bridge has sent waveform data we haven't read yet
+
+	The bridge is either a separate process (twinlan transport) or runs in process (pico transport).
+ */
+bool PicoOscilloscope::IsWaveformDataAvailable()
+{
+	auto twinlan = dynamic_cast<SCPITwinLanTransport*>(m_transport);
+	if(twinlan)
+		return twinlan->GetSecondarySocket().GetRxBytesAvailable() > 0;
+
+#ifdef HAS_PICO
+	auto pico = dynamic_cast<SCPIPicoTransport*>(m_transport);
+	if(pico)
+		return pico->IsDataAvailable();
+#endif
+
+	return false;
 }
 
 bool PicoOscilloscope::AcquireData()

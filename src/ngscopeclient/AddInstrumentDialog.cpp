@@ -186,7 +186,9 @@ bool AddInstrumentDialog::DoRender()
 				"lxi: LXI VXI-11",
 				"twinlan: separate sockets for SCPI text control commands and raw binary waveforms.\n"
 				"Commonly used with bridge servers for interfacing to USB instruments (Digilent, DreamSourceLabs, Pico).",
-				"vicp: Teledyne LeCroy Virtual Instrument Control Protocol"
+				"vicp: Teledyne LeCroy Virtual Instrument Control Protocol",
+				"pico (not TCP/IP): PicoScopes over USB through the Pico SDK, with the Pico bridge built in, so no separate\n"
+				"bridge server is needed. Requires the Pico SDK to be installed."
 			}
 		);
 
@@ -225,6 +227,7 @@ bool AddInstrumentDialog::DoRender()
 				"UART: device path and baud rate (/dev/ttyUSB0:9600, COM1). Default is 115200 if not specified. ",
 				"USBTMC: Linux device path (/dev/usbtmcX)",
 				"IIO: libiio context URI (ip:192.168.2.1, usb:1.5.5, local:). \"mock:\" simulates an AD9363 for testing.",
+				"pico: serial number of the PicoScope (JR123/0045), or empty for the first one found",
 				"USB-HID: Device vendor id, product id (and optionnaly serial number): <vendorId(hex)>:<productId(hex)>:<serialNumber> (e.g.: 2e3c:af01)"
 			}
 		);
@@ -301,8 +304,9 @@ bool AddInstrumentDialog::DoConnect(SCPITransport* transport)
 void AddInstrumentDialog::UpdatePath()
 {
 	if( (m_selectedTransportType == SCPITransportType::TRANSPORT_HID) ||
-		(m_selectedTransportType == SCPITransportType::TRANSPORT_IIO) )
-	{	// Special handling for HID and IIO transports: replace the whole path with endpoint value
+		(m_selectedTransportType == SCPITransportType::TRANSPORT_IIO) ||
+		(m_selectedTransportType == SCPITransportType::TRANSPORT_PICO) )
+	{	// Special handling for HID, IIO and Pico transports: replace the whole path with endpoint value
 		// (the endpoint is a complete IIO context URI such as usb:1.5.5, so we must not keep the old suffix)
 		m_path = m_endpoints[m_selectedEndpoint].path;
 	}

@@ -134,6 +134,7 @@ string to_string(SCPITransportType transportType)
 		case SCPITransportType::TRANSPORT_SOCKETCAN: return "socketcan";
 		case SCPITransportType::TRANSPORT_LXI: return "lxi";
 		case SCPITransportType::TRANSPORT_IIO: return "iio";
+		case SCPITransportType::TRANSPORT_PICO: return "pico";
 	}
 	return "unknown";
 }

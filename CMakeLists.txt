@@ -353,6 +353,7 @@ if(ANALYZE)
 endif()
 
 # Main project code
+add_subdirectory("${PROJECT_SOURCE_DIR}/lib/picobridge")	# before scopehal, which links it if it's there
 add_subdirectory("${PROJECT_SOURCE_DIR}/lib/scopehal")
 add_subdirectory("${PROJECT_SOURCE_DIR}/lib/scopeprotocols")
 add_subdirectory("${PROJECT_SOURCE_DIR}/lib/xptools")
@@ -368,6 +369,7 @@ else()
 endif()
 add_subdirectory("${PROJECT_SOURCE_DIR}/src/miniz")
 add_subdirectory("${PROJECT_SOURCE_DIR}/src/ngscopeclient")
+add_subdirectory("${PROJECT_SOURCE_DIR}/src/ps6000d")
 add_subdirectory("${PROJECT_SOURCE_DIR}/src/nativefiledialog-extended")
 
 add_subdirectory(devdoc)
