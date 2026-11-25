@@ -249,6 +249,68 @@ TEST_CASE("Filter_ComplexFFT")
 		REQUIRE(fabs(out->m_samples[depth/2 - 100] - (expectedDbm - 20)) < 0.1);
 	}
 
+	SECTION("Averaged segments")
+	{
+		//A shorter FFT length averages the power of segments overlapping by half: 7 of 1024 points here.
+		//Bins are 4x as wide, and a tone is at the same level.
+		const size_t fftlen = 1024;
+		filter->GetParameter("FFT Length").SetIntVal(fftlen);
+		const int k4 = 820;		//on a bin of the short FFT too (bin 205)
+		for(auto window : { FFTFilter::WINDOW_RECTANGULAR, FFTFilter::WINDOW_HANN, FFTFilter::WINDOW_HAMMING,
+			FFTFilter::WINDOW_BLACKMAN_HARRIS })
+		{
+			INFO("window " << window);
+			filter->SetWindowFunction(window);
+			auto out = run(k4, 2400000000);
+			REQUIRE(out != nullptr);
+			REQUIRE(out->size() == fftlen);
+			REQUIRE(out->m_timescale == llround(g_sampleRate / fftlen * 1e6));
+
+			size_t peak = FindPeakBin(out);
+			REQUIRE(peak == fftlen/2 + k4/4);
+			REQUIRE(fabs(out->m_samples[peak] - expectedDbm) < 0.3);
+			double peakHz = (out->m_triggerPhase + static_cast<int64_t>(peak) * out->m_timescale) / 1e6;
+			REQUIRE(fabs(peakHz - (2400000000.0 + k4 * binHz)) < 1);
+		}
+
+		//With a rectangular window the total power of the bins is the input's power (Parseval), however long the FFT.
+		//Noise is spread over all the bins, so it's a test of the scaling of the average, not just of one bin.
+		filter->SetWindowFunction(FFTFilter::WINDOW_RECTANGULAR);
+		auto totalPower = [&](size_t len)
+		{
+			filter->GetParameter("FFT Length").SetIntVal(len);
+			minstd_rand rng(1);
+			normal_distribution<float> noise(0, 0.1);
+			auto ui = MakeToneI(depth, 0, 0);
+			auto uq = MakeToneQ(depth, 0, 0);
+			for(size_t n=0; n<depth; n++)
+			{
+				ui->m_samples[n] = noise(rng);
+				uq->m_samples[n] = noise(rng);
+			}
+			ui->MarkSamplesModifiedFromCpu();
+			uq->MarkSamplesModifiedFromCpu();
+			src->SetData(ui, 0);
+			src->SetData(uq, 1);
+			src->UpdateCenterFrequency(2400000000);
+			exec.RunBlocking(nodes);
+			auto out = dynamic_cast<UniformAnalogWaveform*>(filter->GetData(0));
+			REQUIRE(out != nullptr);
+			REQUIRE(out->size() == min(len, depth));
+			out->PrepareForCpuAccess();
+			double mw = 0;
+			for(size_t i=0; i<out->size(); i++)
+				mw += pow(10, out->m_samples[i] / 10);
+			return 10 * log10(mw);
+		};
+		double whole = totalPower(depth);
+		double averaged = totalPower(fftlen);
+		INFO("whole " << whole << " dBm, averaged " << averaged << " dBm");
+		REQUIRE(fabs(averaged - whole) < 0.2);
+
+		filter->GetParameter("FFT Length").SetIntVal(0);
+	}
+
 	SECTION("Mismatched I and Q")
 	{
 		//I and Q at different sample rates can't be combined

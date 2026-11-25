@@ -37,6 +37,10 @@ using namespace std;
 
 ComplexFFTFilter::ComplexFFTFilter(const string& color)
 	: FFTFilter(color)
+	, m_fftLength(m_parameters["FFT Length"])
+	, m_cachedNumSegments(0)
+	, m_averageLogMagnitudeComputePipeline(
+		"shaders/ComplexToLogMagnitudeShiftedAverage.spv", 2, sizeof(ComplexAverageLogMagnitudeArgs))
 {
 	//remove base class ports
 	m_inputs.clear();
@@ -61,6 +65,15 @@ ComplexFFTFilter::ComplexFFTFilter(const string& color)
 		"shaders/ComplexCosineSumWindow.spv", 3, sizeof(WindowFunctionArgs));
 	m_complexToLogMagnitudeComputePipeline.Reinitialize(
 		"shaders/ComplexToLogMagnitudeShifted.spv", 2, sizeof(ComplexToMagnitudeArgs));
+
+	//FFT length. Shorter than the input, the input is split into segments overlapping by half, and the power in
+	//each bin is averaged over the segments (Welch's method). Bins are wider, so the noise in each is higher, but a
+	//tone has the same level.
+	m_fftLength = FilterParameter(FilterParameter::TYPE_ENUM, Unit(Unit::UNIT_COUNTS));
+	m_fftLength.AddEnumValue("Whole input", 0);
+	for(int64_t len = 1024; len <= 1048576; len *= 2)
+		m_fftLength.AddEnumValue(to_string(len), len);
+	m_fftLength.SetIntVal(0);
 }
 
 ComplexFFTFilter::~ComplexFFTFilter()
@@ -80,31 +93,25 @@ string ComplexFFTFilter::GetProtocolName()
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Actual decoder logic
 
-void ComplexFFTFilter::ReallocateComplexBuffers(size_t npoints)
+void ComplexFFTFilter::ReallocateComplexBuffers(size_t ninput, size_t npoints, size_t nsegments)
 {
-	m_cachedNumPoints = npoints;
+	m_cachedNumPoints = ninput;
 	m_cachedNumPointsFFT = npoints;
+	m_cachedNumSegments = nsegments;
 
 	m_rdinbuf.SetCpuAccessHint(AcceleratorBuffer<float>::HINT_NEVER);
 	m_rdinbuf.SetGpuAccessHint(AcceleratorBuffer<float>::HINT_LIKELY);
 	m_rdoutbuf.SetCpuAccessHint(AcceleratorBuffer<float>::HINT_NEVER);
 	m_rdoutbuf.SetGpuAccessHint(AcceleratorBuffer<float>::HINT_LIKELY);
 
-	//Update our FFT plan if it's out of date
-	if(m_vkPlan)
-	{
-		if(m_vkPlan->size() != npoints)
-			m_vkPlan = nullptr;
-	}
-	if(!m_vkPlan)
-	{
-		m_vkPlan = make_unique<VulkanFFTPlan>(
-			npoints, npoints, VulkanFFTPlan::DIRECTION_FORWARD, 1, VulkanFFTPlan::TYPE_COMPLEX);
-	}
+	//Make a new FFT plan (only called when the size or segment count changes)
+	m_vkPlan = nullptr;
+	m_vkPlan = make_unique<VulkanFFTPlan>(
+		npoints, npoints, VulkanFFTPlan::DIRECTION_FORWARD, nsegments, VulkanFFTPlan::TYPE_COMPLEX);
 
 	//Complex data is stored as interleaved I/Q
-	m_rdinbuf.resize(npoints * 2);
-	m_rdoutbuf.resize(npoints * 2);
+	m_rdinbuf.resize(npoints * 2 * nsegments);
+	m_rdoutbuf.resize(npoints * 2 * nsegments);
 }
 
 void ComplexFFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<QueueHandle> queue)
@@ -150,19 +157,34 @@ void ComplexFFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<Queue
 	}
 
 	//An empty input (e.g. a session loaded offline with no waveform data) has nothing to transform
-	const size_t npoints = min(din_i->size(), din_q->size());
-	if(npoints == 0)
+	const size_t ninput = min(din_i->size(), din_q->size());
+	if(ninput == 0)
 	{
 		AddErrorMessage("Missing inputs", "Input waveform is empty");
 		SetData(nullptr, 0);
 		return;
 	}
-	LogTrace("ComplexFFTFilter: processing %zu input samples\n", npoints);
+	LogTrace("ComplexFFTFilter: processing %zu input samples\n", ninput);
+
+	//FFT the whole input, or average segments of the FFT length overlapping by half
+	size_t npoints = ninput;
+	size_t nsegments = 1;
+	size_t hop = 0;
+	auto fftlen = static_cast<size_t>(m_fftLength.GetIntVal());
+	if( (fftlen > 0) && (fftlen < ninput) )
+	{
+		npoints = fftlen;
+		hop = fftlen / 2;
+		nsegments = (ninput - fftlen) / hop + 1;
+	}
 
 	m_xAxisUnit = Unit(Unit::UNIT_MICROHZ);
 	m_cachedNumOuts = npoints;
-	if( (m_cachedNumPoints != npoints) || !m_vkPlan)
-		ReallocateComplexBuffers(npoints);
+	if( (m_cachedNumPoints != ninput) || (m_cachedNumPointsFFT != npoints) || (m_cachedNumSegments != nsegments) ||
+		!m_vkPlan)
+	{
+		ReallocateComplexBuffers(ninput, npoints, nsegments);
+	}
 
 	//Both positive and negative frequencies are in the output, so the bins cover the whole sample rate
 	double fs_per_sample = din_i->m_timescale;
@@ -261,9 +283,23 @@ void ComplexFFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<Queue
 			wpipe->BindBufferNonblocking(0, din_i->m_samples, cmdBuf);
 			wpipe->BindBufferNonblocking(1, m_rdinbuf, cmdBuf, true);
 			wpipe->BindBufferNonblocking(2, din_q->m_samples, cmdBuf);
-			wpipe->Dispatch(cmdBuf, args,
-				min(compute_block_count, 32768u),
-				compute_block_count / 32768 + 1);
+			for(size_t i=0; i<nsegments; i++)
+			{
+				args.offsetIn = i * hop;
+				args.offsetOut = i * npoints;
+				if(i == 0)
+				{
+					wpipe->Dispatch(cmdBuf, args,
+						min(compute_block_count, 32768u),
+						compute_block_count / 32768 + 1);
+				}
+				else
+				{
+					wpipe->DispatchNoRebind(cmdBuf, args,
+						min(compute_block_count, 32768u),
+						compute_block_count / 32768 + 1);
+				}
+			}
 			wpipe->AddComputeMemoryBarrier(cmdBuf);
 			m_rdinbuf.MarkModifiedFromGpu();
 		}
@@ -279,16 +315,33 @@ void ComplexFFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<Queue
 			NamedDebugRange shaderRange(cmdBuf, "Postprocess");
 
 			const float impedance = 50;
-			ComplexToMagnitudeArgs cargs;
-			cargs.npoints = npoints;
-			cargs.scale = scale * scale / impedance;
+			if(nsegments == 1)
+			{
+				ComplexToMagnitudeArgs cargs;
+				cargs.npoints = npoints;
+				cargs.scale = scale * scale / impedance;
 
-			m_complexToLogMagnitudeComputePipeline.BindBufferNonblocking(0, m_rdoutbuf, cmdBuf);
-			m_complexToLogMagnitudeComputePipeline.BindBufferNonblocking(1, cap->m_samples, cmdBuf, true);
-			m_complexToLogMagnitudeComputePipeline.AddComputeMemoryBarrier(cmdBuf);
-			m_complexToLogMagnitudeComputePipeline.Dispatch(cmdBuf, cargs,
-				min(compute_block_count, 32768u),
-				compute_block_count / 32768 + 1);
+				m_complexToLogMagnitudeComputePipeline.BindBufferNonblocking(0, m_rdoutbuf, cmdBuf);
+				m_complexToLogMagnitudeComputePipeline.BindBufferNonblocking(1, cap->m_samples, cmdBuf, true);
+				m_complexToLogMagnitudeComputePipeline.AddComputeMemoryBarrier(cmdBuf);
+				m_complexToLogMagnitudeComputePipeline.Dispatch(cmdBuf, cargs,
+					min(compute_block_count, 32768u),
+					compute_block_count / 32768 + 1);
+			}
+			else
+			{
+				ComplexAverageLogMagnitudeArgs cargs;
+				cargs.npoints = npoints;
+				cargs.nsegments = nsegments;
+				cargs.scale = scale * scale / impedance;
+
+				m_averageLogMagnitudeComputePipeline.BindBufferNonblocking(0, m_rdoutbuf, cmdBuf);
+				m_averageLogMagnitudeComputePipeline.BindBufferNonblocking(1, cap->m_samples, cmdBuf, true);
+				m_averageLogMagnitudeComputePipeline.AddComputeMemoryBarrier(cmdBuf);
+				m_averageLogMagnitudeComputePipeline.Dispatch(cmdBuf, cargs,
+					min(compute_block_count, 32768u),
+					compute_block_count / 32768 + 1);
+			}
 		}
 	}
 
