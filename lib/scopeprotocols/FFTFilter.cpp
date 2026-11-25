@@ -335,9 +335,11 @@ void FFTFilter::DoRefresh(
 			pipe.BindBufferNonblocking(0, m_rdoutbuf, cmdBuf);
 			pipe.BindBufferNonblocking(1, cap->m_samples, cmdBuf, true);
 			pipe.AddComputeMemoryBarrier(cmdBuf);
+			//One thread per output bin (about half the input points)
+			const uint32_t out_block_count = GetComputeBlockCount(nouts, 64);
 			pipe.Dispatch(cmdBuf, cargs,
-				min(compute_block_count, 32768u),
-				compute_block_count / 32768 + 1);
+				min(out_block_count, 32768u),
+				out_block_count / 32768 + 1);
 		}
 	}
 

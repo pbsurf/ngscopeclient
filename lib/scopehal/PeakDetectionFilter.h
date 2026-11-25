@@ -86,8 +86,6 @@ public:
 			//TODO: use the GPU
 			cap->PrepareForCpuAccess();
 
-			std::vector<Peak> peaks;
-
 			//Get peak search width in bins
 			//(assume bins are equal size, this should get us close)
 			int64_t binsize = GetOffsetScaled(cap, 1) - GetOffsetScaled(cap, 0);
@@ -95,44 +93,27 @@ public:
 			int64_t search_rad = search_bins/2;
 			search_rad = std::max(search_rad, (int64_t)1);
 
-			float baseline = Filter::GetMinVoltage(cap);
-
-			//Find peaks (TODO: can we vectorize/multithread this?)
-			ssize_t nend = nouts-1;
-			size_t minpeak = 10;		//Skip this many bins at left to avoid false positives on the DC peak
-										//(TODO: this only makes sense for FFT)
-			for(ssize_t i=minpeak; i<nend; i++)
+			//Find peaks: bins higher than everything else within search_rad bins on either side
+			struct Candidate
 			{
-				//Locate the peak
-				ssize_t left = std::max((ssize_t)minpeak, (ssize_t)(i - search_rad));
-				ssize_t right = std::min((ssize_t)(i + search_rad), (ssize_t)nend);
+				ssize_t index;
+				int64_t x;
+				float y;
+			};
+			std::vector<Candidate> candidates;
+			const float* s = cap->m_samples.GetCpuPointer();
+			ssize_t nend = nouts-1;
+			ssize_t minpeak = 10;		//Skip this many bins at left to avoid false positives on the DC peak
+										//(TODO: this only makes sense for FFT)
 
-				float target = cap->m_samples[i];
-				bool is_peak = true;
-				for(ssize_t j=left; j<=right; j++)
-				{
-					if(i == j)
-						continue;
-					if(cap->m_samples[j] >= target)
-					{
-						//Something higher is to our right.
-						//It's higher than anything from left to j. This makes it a candidate peak.
-						//Restart our search from there.
-						if(j > i)
-							i = j-1;
-
-						is_peak = false;
-						break;
-					}
-				}
-				if(!is_peak)
-					continue;
-
+			//Adds a peak at bin i to the candidates
+			auto addCandidate = [&](ssize_t i)
+			{
 				//Quadratic interpolate peak position
 				//https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html
-				float alpha = cap->m_samples[i-1];
-				float beta = cap->m_samples[i];
-				float gamma = cap->m_samples[i+1];
+				float alpha = s[i-1];
+				float beta = s[i];
+				float gamma = s[i+1];
 				float p = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma);
 				int64_t peak_location =
 					(i * cap->m_timescale) +
@@ -142,19 +123,135 @@ public:
 				//Interpolate peak magnitude
 				float lerpMag = beta - 0.25 * (alpha - gamma) * p;
 
+				candidates.push_back({i, peak_location, lerpMag});
+			};
+
+			//Peaks can be in bins minpeak to nend-1, and are compared against bins minpeak to nend.
+			//Both searches below find the same peaks; the second is faster unless the window is only a few bins wide
+			//(then most bins are peaks)
+			ssize_t rad = search_rad;
+			if(rad < 16)
+			{
+				for(ssize_t i=minpeak; i<nend; i++)
+				{
+					ssize_t left = std::max(minpeak, i - rad);
+					ssize_t right = std::min(i + rad, nend);
+
+					float target = s[i];
+					bool is_peak = true;
+					for(ssize_t j=left; j<=right; j++)
+					{
+						if(i == j)
+							continue;
+						if(s[j] >= target)
+						{
+							//Something higher is to our right.
+							//It's higher than anything from left to j. This makes it a candidate peak.
+							//Restart our search from there.
+							if(j > i)
+								i = j-1;
+
+							is_peak = false;
+							break;
+						}
+					}
+					if(!is_peak)
+						continue;
+
+					addCandidate(i);
+
+					//We know we're the highest point until at least i+search_rad.
+					//Don't bother searching those points.
+					i += (rad-1);
+				}
+			}
+			else
+			{
+				//Split the bins peaks can be in into blocks of search_rad bins. Any two bins in a block are within
+				//search_rad of each other, so only the highest bin in a block can be a peak. Find those first:
+				//this loop's branch is rarely taken, unlike a test of each bin against its neighbors on a noisy
+				//spectrum (which mispredicts often)
+				size_t nblocks = (nend > minpeak) ? (nend - minpeak + rad - 1) / rad : 0;
+				std::vector<ssize_t> blockMaxIndex(nblocks);
+				std::vector<float> blockMax(nblocks);
+				for(size_t b=0; b<nblocks; b++)
+				{
+					ssize_t start = minpeak + b*rad;
+					ssize_t end = std::min(start + rad, nend);
+					ssize_t imax = start;
+					for(ssize_t j=start+1; j<end; j++)
+					{
+						if(s[j] > s[imax])
+							imax = j;
+					}
+					blockMaxIndex[b] = imax;
+					blockMax[b] = s[imax];
+				}
+
+				//A block's highest bin (the first one, if there's a tie) is a peak if nothing else within search_rad
+				//is as high. That covers the rest of its own block and parts of the blocks on either side, which
+				//only need searching if their highest bin is as high
+				for(size_t b=0; b<nblocks; b++)
+				{
+					ssize_t i = blockMaxIndex[b];
+					float target = s[i];
+					ssize_t start = minpeak + b*rad;
+					ssize_t end = std::min(start + rad, nend);
+
+					bool higher = false;
+					for(ssize_t j=i+1; j<end; j++)
+						higher |= (s[j] >= target);
+					if( (b > 0) && (blockMax[b-1] >= target) )
+					{
+						for(ssize_t j=std::max(minpeak, i - rad); j<start; j++)
+							higher |= (s[j] >= target);
+					}
+					if( (b+1 < nblocks) && (blockMax[b+1] >= target) )
+					{
+						ssize_t right = std::min(i + rad, nend);
+						for(ssize_t j=end; j<=right; j++)
+							higher |= (s[j] >= target);
+					}
+
+					//Bin nend isn't in any block
+					if( (i + rad >= nend) && (s[nend] >= target) )
+						higher = true;
+
+					if(!higher)
+						addCandidate(i);
+				}
+			}
+
+			//Keep the requested count, tallest first
+			size_t nkeep = std::min((size_t)max_peaks, candidates.size());
+			std::partial_sort(candidates.begin(), candidates.begin() + nkeep, candidates.end(),
+				[](const Candidate& a, const Candidate& b) { return a.y > b.y; });
+
+			//Only a linear Y axis needs the baseline (a full pass over the waveform)
+			float baseline = 0;
+			if(!yUnitIsDB)
+				baseline = Filter::GetMinVoltage(cap);
+
+			//Find the FWHM of the peaks we keep
+			m_peaks.clear();
+			for(size_t k=0; k<nkeep; k++)
+			{
+				auto& c = candidates[k];
+				ssize_t i = c.index;
+
 				//Move left and right from the peak until we get half magnitude
 				//If Y axis is dB, we want to be half *magnitude* not half dB
 				float hmtarget;
 				if(yUnitIsDB)
-					hmtarget = lerpMag - 3;
+					hmtarget = c.y - 3;
 				else
-					hmtarget = (lerpMag - baseline)/2 + baseline;
+					hmtarget = (c.y - baseline)/2 + baseline;
 				ssize_t hmleft = i;
 				ssize_t hmright = i;
 				for(ssize_t j=i; j >= 0; j--)
 				{
 					//TODO: interpolate
-					if(cap->m_samples[j] <= hmtarget)
+					if(s[j] <= hmtarget)
 					{
 						 hmleft = j;
 						 break;
@@ -163,7 +260,7 @@ public:
 				for(ssize_t j=i; j < (ssize_t)nouts; j++)
 				{
 					//TODO: interpolate
-					if(cap->m_samples[j] <= hmtarget)
+					if(s[j] <= hmtarget)
 					{
 						 hmright = j;
 						 break;
@@ -171,20 +268,7 @@ public:
 				}
 				float fwhm = GetOffsetScaled(cap, hmright) - GetOffsetScaled(cap, hmleft);
 
-				peaks.push_back(Peak(peak_location, lerpMag, fwhm));
-
-				//We know we're the highest point until at least i+search_rad.
-				//Don't bother searching those points.
-				i += (search_rad-1);
-			}
-
-			//Sort the peak table and pluck out the requested count
-			std::sort(peaks.rbegin(), peaks.rend(), std::less<Peak>());
-			m_peaks.clear();
-			for(size_t i=0; i<(size_t)max_peaks && i<peaks.size(); i++)
-			{
-				//TODO: Find FWHM of only the target peaks
-				m_peaks.push_back(peaks[i]);
+				m_peaks.push_back(Peak(c.x, c.y, fwhm));
 			}
 		}
 
