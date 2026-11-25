@@ -54,6 +54,8 @@ class OscilloscopeState;
 
 void WakeMainLoop();
 
+extern int g_perfLogInterval;
+
 class InstrumentThreadArgs
 {
 public:

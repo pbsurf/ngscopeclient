@@ -55,7 +55,11 @@ atomic<int64_t> g_lastWaveformRenderTime;
 ///@brief True while no window is on screen, so rasterizing and tone mapping would be wasted work
 atomic<bool> g_waveformRenderingPaused(false);
 
+///@brief Log performance statistics every this many waveforms (--perf-log), or never if zero
+int g_perfLogInterval = 0;
+
 void RenderAllWaveforms(vk::raii::CommandBuffer& cmdbuf, Session* session, shared_ptr<QueueHandle> queue);
+static void LogPerformance(Session* session);
 
 void WaveformThread(Session* session, atomic<bool>* shuttingDown)
 {
@@ -154,6 +158,9 @@ void WaveformThread(Session* session, atomic<bool>* shuttingDown)
 		//Rerun the heavyweight rendering shaders
 		RenderAllWaveforms(cmdbuf, session, queue);
 
+		if(g_perfLogInterval > 0)
+			LogPerformance(session);
+
 		//Unblock the UI threads, then wait for acknowledgement that it's processed
 		g_waveformReadyEvent.Signal();
 		WakeMainLoop();
@@ -189,4 +196,62 @@ void RenderAllWaveforms(vk::raii::CommandBuffer& cmdbuf, Session* session, share
 	queue->SubmitAndBlock(cmdbuf);
 
 	g_lastWaveformRenderTime = (GetTime() - tstart) * FS_PER_SECOND;
+}
+
+/**
+	@brief Adds up timings for each waveform, and logs the averages every g_perfLogInterval waveforms (--perf-log)
+
+	For benchmarking from scripts. Times are those MetricsDialog and the filter graph editor show for one waveform.
+ */
+static void LogPerformance(Session* session)
+{
+	//The rate is measured from the waveform before the first one counted
+	static double tlast = 0;
+	static int count = -1;
+	static double graphTime = 0;
+	static double renderTime = 0;
+	static map<FlowGraphNode*, double> filterTimes;
+
+	double now = GetTime();
+	if(count < 0)
+	{
+		tlast = now;
+		count = 0;
+		return;
+	}
+
+	graphTime += session->GetFilterGraphExecTime() / FS_PER_SECOND;
+	renderTime += g_lastWaveformRenderTime / FS_PER_SECOND;
+	for(auto it : session->GetFilterGraphRuntime())
+		filterTimes[it.first] += it.second / FS_PER_SECOND;
+	count++;
+	if(count < g_perfLogInterval)
+		return;
+
+	//Slowest filters first. Skip nodes that aren't filters (or were deleted since)
+	vector<pair<double, string>> sorted;
+	auto& instances = Filter::GetAllInstances();
+	for(auto it : filterTimes)
+	{
+		auto f = dynamic_cast<Filter*>(it.first);
+		if( (f != nullptr) && (instances.find(f) != instances.end()) )
+			sorted.push_back({it.second, f->GetDisplayName()});
+	}
+	sort(sorted.rbegin(), sorted.rend());
+	string filters;
+	for(auto& it : sorted)
+	{
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%.2f", it.first * 1000 / count);
+		filters += " " + it.second + "=" + buf + "ms";
+	}
+
+	LogNotice("PERF %d waveforms: %.2f wfm/s, filter graph %.2f ms, render %.2f ms;%s\n",
+		count, count / (now - tlast), graphTime * 1000 / count, renderTime * 1000 / count, filters.c_str());
+
+	tlast = now;
+	count = 0;
+	graphTime = 0;
+	renderTime = 0;
+	filterTimes.clear();
 }

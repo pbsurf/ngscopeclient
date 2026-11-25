@@ -93,6 +93,9 @@ static void print_help(FILE* stream)
 		"      write log entries to the specified file with line buffering\n"
 		"  --stdout-only\n"
 		"      only write logs to stdout (normally warning and above go to stderr)\n"
+		"  --perf-log <n>\n"
+		"      every n waveforms, log the waveform rate and the average filter graph,\n"
+		"      per filter and rendering times\n"
 		"\n"
 		"Session files:\n"
 		"  If you wish to resume a prior session, pass the path to a session file\n"
@@ -195,6 +198,12 @@ int main(int argc, char* argv[])
 		if (s == "--offline")
 		{
 			offlineSession = true;
+			continue;
+		}
+
+		if( (s == "--perf-log") && (i+1 < argc) )
+		{
+			g_perfLogInterval = max(atoi(argv[++i]), 0);
 			continue;
 		}
 
