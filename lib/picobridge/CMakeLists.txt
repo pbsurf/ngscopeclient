@@ -5,8 +5,10 @@
 # If the headers aren't found, the picobridge target isn't created.
 
 set(PICO_SDK_INCLUDE_DIR "" CACHE PATH "Directory with the Pico SDK headers (ps6000aApi.h etc), if not in the default place")
+option(REQUIRE_PICO "Fail if the Pico SDK headers aren't found, instead of building without the pico transport (for CI)" OFF)
 set(PICO_FOUND TRUE)
 set(PICO_INCLUDE_DIRS "")
+set(PICO_MISSING "")
 foreach(api ps2000a ps3000a ps4000a ps5000a ps6000a psospa)
 	find_path(PICO_${api}_INCLUDE_DIR ${api}Api.h
 		HINTS
@@ -19,9 +21,14 @@ foreach(api ps2000a ps3000a ps4000a ps5000a ps6000a psospa)
 		list(APPEND PICO_INCLUDE_DIRS ${PICO_${api}_INCLUDE_DIR})
 	else()
 		set(PICO_FOUND FALSE)
+		list(APPEND PICO_MISSING ${api}Api.h)
 	endif()
 endforeach()
 
+if(NOT PICO_FOUND AND REQUIRE_PICO)
+	message(FATAL_ERROR "Pico SDK headers not found: ${PICO_MISSING} (REQUIRE_PICO is on). Set PICO_SDK_INCLUDE_DIR to the directory with "
+		"lib<api>/ subfolders or the headers themselves.")
+endif()
 if(NOT PICO_FOUND)
 	message("-- Pico SDK headers not found (set PICO_SDK_INCLUDE_DIR), the pico transport will not be available. "
 		"PicoScopes can still be used through scopehal-pico-bridge and the twinlan transport.")

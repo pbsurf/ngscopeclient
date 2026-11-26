@@ -110,6 +110,7 @@ jobs:
           -DPKG_CONFIG_EXECUTABLE="$PWD/build/linux/vcpkg_installed/x64-linux-release/tools/pkgconf/pkgconf" \
           -DVulkan_GLSLC_EXECUTABLE="$PWD/build/linux/vcpkg_installed/x64-linux-release/tools/shaderc/glslc" \
           -DPICO_SDK_INCLUDE_DIR="$RUNNER_TEMP/pico-sdk-inc" \
+          -DREQUIRE_PICO=ON \
           -DNFD_PORTAL=ON \
           -DBUILD_TESTING=OFF \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \

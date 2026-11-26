@@ -1,5 +1,6 @@
 # Windows build: MSVC + vcpkg, with the pico transport (Pico SDK headers fetched from Pico's apt repo).
-# Produces a zip of the program folder (exe, DLLs, data folders) and a separate pdb artifact.
+# Produces a zip of the program folder (exe, DLLs, data folders, licenses) and a separate pdb artifact. Pushes to
+# master also update the public "nightly" prerelease with the program (not the pdb).
 # The unit tests aren't run yet: they need Vulkan and the runners have no GPU (would need a software driver,
 # e.g. Mesa's lavapipe for Windows).
 
@@ -26,6 +27,8 @@ jobs:
     # VS 2022, as used locally (msvc/install-buildtools.ps1)
     runs-on: windows-2022
     timeout-minutes: 240
+    outputs:
+      suffix: ${{ steps.package.outputs.suffix }}
 
     env:
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
@@ -91,6 +94,7 @@ jobs:
         -DPKG_CONFIG_EXECUTABLE="${{ github.workspace }}\build\windows-msvc\vcpkg_installed\x64-windows-release\tools\pkgconf\pkgconf.exe"
         -DVulkan_GLSLC_EXECUTABLE="${{ github.workspace }}\build\windows-msvc\vcpkg_installed\x64-windows-release\tools\shaderc\glslc.exe"
         -DPICO_SDK_INCLUDE_DIR="${{ runner.temp }}\pico-sdk-inc"
+        -DREQUIRE_PICO=ON
         -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
         -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
         -DCMAKE_C_COMPILER_LAUNCHER=ccache
@@ -106,14 +110,8 @@ jobs:
     - name: Build
       run: cmake --build --preset windows-msvc
 
-    - name: Check the pico transport was built
-      shell: pwsh
-      run: |
-        if (-not (Select-String -Quiet -Path build\windows-msvc\CMakeCache.txt -Pattern '^PICO_ps6000a_INCLUDE_DIR:PATH=.+')) {
-          throw "Pico SDK headers not found by CMake"
-        }
-
     - name: Package
+      id: package
       shell: pwsh
       run: |
         $src = "build\windows-msvc\src\ngscopeclient"
@@ -122,10 +120,25 @@ jobs:
         robocopy $src $dst /E /NFL /NDL /NJH /NJS /XD CMakeFiles /XF *.cmake *.exp *.ilk *.lib *.pdb ngscopeclient-version.h
         if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
         Copy-Item LICENSE $dst
+
+        # Licence notices for what's bundled: vcpkg's packages (DLLs, some LGPL) and the third-party code in the
+        # tree (imgui etc). One file per package in licenses\.
+        $lic = "$dst\licenses"
+        New-Item -ItemType Directory -Force $lic | Out-Null
+        Get-ChildItem "build\windows-msvc\vcpkg_installed\x64-windows-release\share" -Directory | ForEach-Object {
+          $c = Join-Path $_.FullName "copyright"
+          if (Test-Path $c) { Copy-Item $c "$lic\$($_.Name).txt" }
+        }
+        Get-ChildItem lib, src, lib\third_party -Directory | ForEach-Object {
+          $f = Get-ChildItem $_.FullName -File | Where-Object { $_.Name -match '^(licen[cs]e|copying)(\.txt|\.md)?$' } | Select-Object -First 1
+          if ($f) { Copy-Item $f.FullName "$lic\$($_.Name).txt" }
+        }
+
         New-Item -ItemType Directory -Force dist\pdb | Out-Null
         Copy-Item "$src\ngscopeclient.pdb" dist\pdb
         $sha = "${{ github.sha }}".Substring(0, 8)
         "ARTIFACT_SUFFIX=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        "suffix=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
         exit 0
 
     - name: Upload program
@@ -141,3 +154,56 @@ jobs:
         name: ngscopeclient-windows-x64-${{ env.ARTIFACT_SUFFIX }}-pdb
         path: dist/pdb
         if-no-files-found: error
+
+  # Rolling "nightly" prerelease: every successful push to master replaces its files and moves the nightly tag to
+  # that commit. Fixed file names, so the download links stay the same. Moving the tag doesn't start a run (pushes
+  # by GITHUB_TOKEN never do).
+  nightly:
+    needs: msvc
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # One update at a time, oldest first (the build's own concurrency group already drops superseded runs)
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+    - name: Download program
+      uses: actions/download-artifact@v4
+      with:
+        name: ngscopeclient-windows-x64-${{ needs.msvc.outputs.suffix }}
+        path: dist/ngscopeclient
+
+    - name: Zip
+      run: |
+        cd dist
+        zip -qr9 ../ngscopeclient-windows-x64.zip ngscopeclient
+        ls -l ..
+
+    - name: Update the nightly release
+      run: |
+        notes="Latest build of master: ${GITHUB_SHA::8} ($(date -u '+%Y-%m-%d %H:%M UTC'), run [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})).
+
+        Windows x64: unzip and run ngscopeclient.exe. PicoScopes (pico transport) need the PicoSDK installed from Pico Technology.
+        Debug symbols (for crash dumps): the pdb artifact of the run linked above (needs a GitHub login).
+
+        Unreleased development build, replaced by every push to master."
+
+        if ! gh release view nightly > /dev/null 2>&1; then
+          gh release create nightly --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Nightly build" --notes "$notes"
+        fi
+        gh release upload nightly ngscopeclient-windows-x64.zip --clobber
+
+        # Move the tag to this commit (create it if the release was made without one)
+        if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" > /dev/null 2>&1; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+        else
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" > /dev/null
+        fi
+        gh release edit nightly --prerelease --latest=false --notes "$notes"
