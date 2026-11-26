@@ -3570,6 +3570,9 @@ bool MainWindow::LoadDialogs(const YAML::Node& node)
 	be slow and would replace the captured data with the current history. Sessions which were never saved have no
 	file to go to, and are left alone.
 
+	Not saved either if instruments in the session couldn't be loaded (no offline driver for their type), since
+	saving would remove them from the file.
+
 	Called once the main loop has exited, so there's no way to show an error popup; failures are only logged.
  */
 void MainWindow::SaveSessionOnExit()
@@ -3578,6 +3581,17 @@ void MainWindow::SaveSessionOnExit()
 		return;
 	if(m_sessionFileName.empty())
 		return;
+
+	//Saving would remove instruments that couldn't be loaded from the file
+	if(m_session.HasDroppedInstruments())
+	{
+		string names;
+		for(auto& nick : m_session.GetDroppedInstruments())
+			names += (names.empty() ? "\"" : ", \"") + nick + "\"";
+		LogWarning("Not saving configuration to \"%s\" on exit: instruments %s couldn't be loaded and would be "
+			"removed from it\n", m_sessionFileName.c_str(), names.c_str());
+		return;
+	}
 
 	LogNotice("Saving configuration to \"%s\" on exit\n", m_sessionFileName.c_str());
 	if(!DoSaveFile(m_sessionFileName, true))
@@ -3650,6 +3664,9 @@ bool MainWindow::DoSaveFile(string sessionPath, bool keepWaveforms)
 		ShowErrorPopup("Failed to save session", writer->GetError());
 		return false;
 	}
+
+	//The file no longer has any instruments that couldn't be loaded, so saving on exit is safe again
+	m_session.ClearDroppedInstruments();
 
 	//Add to recent files list
 	m_sessionFileName = sessionPath;

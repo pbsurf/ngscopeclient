@@ -313,6 +313,7 @@ void Session::Clear()
 
 	//Remove any existing IDs
 	m_idtable.clear();
+	m_droppedInstruments.clear();
 
 	//Free scratch buffers
 	ScratchBufferManager::clear();
@@ -1108,6 +1109,7 @@ bool Session::PreLoadInstruments(int version, const YAML::Node& node, bool onlin
 	LogIndenter li;
 
 	m_warnings.clear();
+	m_droppedInstruments.clear();
 
 	if(!node)
 	{
@@ -1265,6 +1267,34 @@ bool Session::VerifyInstrument(const YAML::Node& node, shared_ptr<Instrument> in
 	}
 
 	return true;
+}
+
+/**
+	@brief Notes that an instrument in the session being loaded couldn't be created, and was left out
+
+	This happens when the instrument can't be reached (or the session is opened offline) and there's no offline
+	(mock) driver for its type. Anything that used it, such as its waveform views, is lost too. Saving the session
+	now would remove the instrument from the file, so the save on exit is skipped (see HasDroppedInstruments()).
+
+	@param node		The instrument's node in the session file
+	@param types	Plural name of the instrument type, for messages ("SDRs")
+ */
+void Session::DropInstrument(const YAML::Node& node, const string& types)
+{
+	auto nick = node["nick"].as<string>();
+	LogError("offline loading of %s not implemented yet, leaving out \"%s\"\n", types.c_str(), nick.c_str());
+	m_droppedInstruments.push_back(nick);
+
+	string msg =
+		string("Couldn't load \"") + nick + "\": it isn't connected and offline loading of " + types +
+		" is not implemented yet, so it was left out of this session, along with its waveform views.";
+	if(GetPreferences().GetBool("Files.save_config_on_exit"))
+	{
+		msg +=
+			"\n\nThe configuration won't be saved on exit, so the session file keeps it. Saving the session "
+			"yourself removes it from the file.";
+	}
+	m_mainWindow->ShowErrorPopup("Instrument left out", msg);
 }
 
 bool Session::PreLoadOscilloscope(int version, const YAML::Node& node, bool online)
@@ -1461,7 +1491,7 @@ bool Session::PreLoadLoad(int version, const YAML::Node& node, bool online)
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of loads not implemented yet\n");
+		DropInstrument(node, "loads");
 		return true;
 	}
 
@@ -1533,7 +1563,7 @@ bool Session::PreLoadMisc(int version, const YAML::Node& node, bool online)
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of misc instruments not implemented yet\n");
+		DropInstrument(node, "misc instruments");
 		return true;
 	}
 
@@ -1605,7 +1635,7 @@ bool Session::PreLoadBERT(int version, const YAML::Node& node, bool online)
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of BERTs not implemented yet\n");
+		DropInstrument(node, "BERTs");
 		return true;
 	}
 
@@ -1677,7 +1707,7 @@ bool Session::PreLoadSDR(int version, const YAML::Node& node, bool online)
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of SDRs not implemented yet\n");
+		DropInstrument(node, "SDRs");
 		return true;
 	}
 
@@ -1746,7 +1776,7 @@ bool Session::PreLoadSpectrometer(int version, const YAML::Node& node, bool onli
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of spectrometers not implemented yet\n");
+		DropInstrument(node, "spectrometers");
 		return true;
 	}
 
@@ -1818,7 +1848,7 @@ bool Session::PreLoadMultimeter(int version, const YAML::Node& node, bool online
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of multimeters not implemented yet\n");
+		DropInstrument(node, "multimeters");
 		return true;
 	}
 
@@ -1958,7 +1988,7 @@ bool Session::PreLoadRFSignalGenerator(int version, const YAML::Node& node, bool
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of RF generators not implemented yet\n");
+		DropInstrument(node, "RF generators");
 		return true;
 	}
 
@@ -2034,7 +2064,7 @@ bool Session::PreLoadFunctionGenerator(int version, const YAML::Node& node, bool
 			node["args"].as<string>()
 			);
 		*/
-		LogError("offline loading of function generators not implemented yet\n");
+		DropInstrument(node, "function generators");
 		return true;
 	}
 
