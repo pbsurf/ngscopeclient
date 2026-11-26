@@ -87,17 +87,12 @@ void ComplexSpectrogramFilter::ReallocateBuffers(size_t fftlen, size_t nblocks)
 	m_cachedFFTLength = fftlen;
 	m_cachedFFTNumBlocks = nblocks;
 
+	//Make a new FFT plan (only called when the size or block count changes; the plan is batched, so the block
+	//count is part of it)
 	size_t nouts = fftlen;
-	if(m_vkPlan)
-	{
-		if(m_vkPlan->size() != fftlen)
-			m_vkPlan = nullptr;
-	}
-	if(!m_vkPlan)
-	{
-		m_vkPlan = make_unique<VulkanFFTPlan>(
-			fftlen, nouts, VulkanFFTPlan::DIRECTION_FORWARD, nblocks, VulkanFFTPlan::TYPE_COMPLEX);
-	}
+	m_vkPlan = nullptr;
+	m_vkPlan = make_unique<VulkanFFTPlan>(
+		fftlen, nouts, VulkanFFTPlan::DIRECTION_FORWARD, nblocks, VulkanFFTPlan::TYPE_COMPLEX);
 
 	m_rdinbuf.SetCpuAccessHint(AcceleratorBuffer<float>::HINT_NEVER);
 	m_rdinbuf.SetGpuAccessHint(AcceleratorBuffer<float>::HINT_LIKELY);
