@@ -62,8 +62,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: vcpkg-binary-cache
-        key: vcpkg-windows-${{ hashFiles('msvc/vcpkg.json', 'msvc/ports/**') }}
-        restore-keys: vcpkg-windows-
+        key: vcpkg-windows-release-${{ hashFiles('msvc/vcpkg.json', 'msvc/ports/**') }}
+        restore-keys: vcpkg-windows-release-
 
     - name: Compiler cache
       uses: hendrikmuhs/ccache-action@v1.2
@@ -79,11 +79,17 @@ jobs:
       with:
         arch: x64
 
+    # Release-only vcpkg triplet: the standard x64-windows builds every package in debug too, which CI never uses.
+    # The preset spells out the x64-windows tool paths, so those are overridden too.
     # Embedded debug info (/Z7 instead of /Zi) so ccache can cache the objects; the linker still writes the pdb.
     # CMP0141 is newer than the project's cmake_minimum_required, so set its default to make CMake honour that.
     - name: Configure
       run: >
         cmake --preset windows-msvc
+        -DVCPKG_TARGET_TRIPLET=x64-windows-release
+        -DVCPKG_HOST_TRIPLET=x64-windows-release
+        -DPKG_CONFIG_EXECUTABLE="${{ github.workspace }}\build\windows-msvc\vcpkg_installed\x64-windows-release\tools\pkgconf\pkgconf.exe"
+        -DVulkan_GLSLC_EXECUTABLE="${{ github.workspace }}\build\windows-msvc\vcpkg_installed\x64-windows-release\tools\shaderc\glslc.exe"
         -DPICO_SDK_INCLUDE_DIR="${{ runner.temp }}\pico-sdk-inc"
         -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
         -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
