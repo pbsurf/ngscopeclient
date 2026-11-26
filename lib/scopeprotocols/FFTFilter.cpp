@@ -119,6 +119,65 @@ string FFTFilter::GetProtocolName()
 	return "FFT";
 }
 
+/**
+	@brief Returns the equivalent noise bandwidth of a window function, in bins
+
+	For a cosine-sum window a0 - a1*cos(x) + a2*cos(2x) - ..., this is (a0^2 + sum(ak^2)/2) / a0^2. The coefficients
+	are the ones the window shaders use (Hamming is the exact 25/46 variant).
+ */
+double FFTFilter::GetWindowENBW(WindowFunction f)
+{
+	auto enbw = [](initializer_list<double> a)
+	{
+		double a0 = *a.begin();
+		double sum = a0 * a0;
+		for(auto it = a.begin() + 1; it != a.end(); it++)
+			sum += (*it) * (*it) / 2;
+		return sum / (a0 * a0);
+	};
+
+	switch(f)
+	{
+		case WINDOW_HANN:
+			return enbw({0.5, 0.5});						//1.5
+
+		case WINDOW_HAMMING:
+			return enbw({25.0 / 46, 21.0 / 46});			//1.353
+
+		case WINDOW_BLACKMAN_HARRIS:
+			return enbw({0.35875, 0.48829, 0.14128, 0.01168});	//2.004
+
+		case WINDOW_RECTANGULAR:
+		default:
+			return 1;
+	}
+}
+
+///@brief Returns the name of a window function, as shown in the Window setting
+string FFTFilter::GetWindowName(WindowFunction f)
+{
+	switch(f)
+	{
+		case WINDOW_HANN:				return "Hann";
+		case WINDOW_HAMMING:			return "Hamming";
+		case WINDOW_BLACKMAN_HARRIS:	return "Blackman-Harris";
+		case WINDOW_RECTANGULAR:
+		default:						return "Rectangular";
+	}
+}
+
+/**
+	@brief Returns the resolution bandwidth of the current output, in X axis units (uHz): the bin width times the
+	window's equivalent noise bandwidth. Zero if there is no output.
+ */
+double FFTFilter::GetRBW()
+{
+	auto data = dynamic_cast<UniformAnalogWaveform*>(GetData(0));
+	if(!data)
+		return 0;
+	return data->m_timescale * GetWindowENBW(GetWindowFunction());
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Actual decoder logic
 

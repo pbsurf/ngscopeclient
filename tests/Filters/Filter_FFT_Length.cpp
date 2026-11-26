@@ -174,6 +174,27 @@ TEST_CASE("Filter_FFT_Length")
 	INFO("whole " << whole << " dBm, averaged " << averaged << " dBm");
 	REQUIRE(fabs(averaged - whole) < 0.2);
 
+	//RBW: the window's equivalent noise bandwidth times the bin width. For white noise, the mean power per bin with
+	//a window, relative to the rectangular window, is the ENBW, given the coherent gain scaling of the tone level.
+	//(The averaged FFT keeps the noise estimate steady.)
+	auto meanPower = [&](FFTFilter::WindowFunction window)
+	{
+		filter->SetWindowFunction(window);
+		auto out = run();
+		double mw = pow(10, TotalPower(out) / 10) / out->size();
+		INFO("window " << window);
+		REQUIRE(fabs(filter->GetRBW() / (out->m_timescale * FFTFilter::GetWindowENBW(window)) - 1) < 1e-9);
+		return mw;
+	};
+	double rect = meanPower(FFTFilter::WINDOW_RECTANGULAR);
+	for(auto window : { FFTFilter::WINDOW_HANN, FFTFilter::WINDOW_HAMMING, FFTFilter::WINDOW_BLACKMAN_HARRIS })
+	{
+		double ratio = meanPower(window) / rect;
+		INFO("window " << window << ": noise " << ratio << " x rectangular, ENBW " <<
+			FFTFilter::GetWindowENBW(window));
+		REQUIRE(fabs(ratio / FFTFilter::GetWindowENBW(window) - 1) < 0.05);
+	}
+
 	filter->GetParameter("FFT Length").SetIntVal(0);
 	g_scope->GetOscilloscopeChannel(0)->Detach(0);
 }

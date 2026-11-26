@@ -55,6 +55,39 @@
 
 using namespace std;
 
+static bool IsFrequencyAxis(Unit unit)
+{
+	return (unit.GetType() == Unit::UNIT_MICROHZ) || (unit.GetType() == Unit::UNIT_HZ);
+}
+
+/**
+	@brief Finds the FFT a spectrum came from, following input 0 upstream while the X axis is frequency
+
+	Filters between the FFT and the display (Spectrum Stitch, Waterfall, resampling, averaging over waveforms) change
+	the bin spacing at most, not the resolution bandwidth, so the FFT's RBW holds for the stream.
+
+	@return The FFT, or null if the stream isn't a spectrum from one
+ */
+static FFTFilter* FindUpstreamFFT(StreamDescriptor stream)
+{
+	//Depth limit, in case of a loop
+	for(int i=0; i<32; i++)
+	{
+		if(!stream.m_channel || !IsFrequencyAxis(stream.GetXAxisUnits()))
+			return nullptr;
+
+		auto fft = dynamic_cast<FFTFilter*>(stream.m_channel);
+		if(fft)
+			return fft;
+
+		auto f = dynamic_cast<Filter*>(stream.m_channel);
+		if(!f || (f->GetInputCount() == 0))
+			return nullptr;
+		stream = f->GetInput(0);
+	}
+	return nullptr;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // DisplayedChannel
 
@@ -5276,25 +5309,52 @@ void WaveformArea::ChannelButton(shared_ptr<DisplayedChannel> chan, size_t index
 					samples.PrettyPrint(data->capacity()) +
 					")\n";
 
-				tooltip +=
-					string("Fine skew: ") + stream.GetXAxisUnits().PrettyPrint(data->m_triggerPhase) + "\n";
-
-				if(udata)
+				//A spectrum: the X axis is frequency, so the timescale is the bin spacing and the trigger phase is the
+				//first bin's frequency
+				auto xunit = stream.GetXAxisUnits();
+				if(IsFrequencyAxis(xunit))
 				{
-					Unit rate(Unit::UNIT_SAMPLERATE);
-					if(data->m_timescale > 1)
-						tooltip += string("Uniformly sampled, ") + rate.PrettyPrint(FS_PER_SECOND / data->m_timescale) + "\n";
+					tooltip += string("Starts at ") + xunit.PrettyPrint(data->m_triggerPhase) + "\n";
+					if(udata)
+						tooltip += string("Bins ") + xunit.PrettyPrint(data->m_timescale) + " apart\n";
 				}
 				else
 				{
-					Unit fs(Unit::UNIT_FS);
-					if(data->m_timescale > 1)
-						tooltip += string("Sparsely sampled, ") + fs.PrettyPrint(data->m_timescale) + " resolution\n";
+					tooltip +=
+						string("Fine skew: ") + xunit.PrettyPrint(data->m_triggerPhase) + "\n";
+
+					if(udata)
+					{
+						Unit rate(Unit::UNIT_SAMPLERATE);
+						if(data->m_timescale > 1)
+						{
+							tooltip += string("Uniformly sampled, ") +
+								rate.PrettyPrint(FS_PER_SECOND / data->m_timescale) + "\n";
+						}
+					}
+					else
+					{
+						Unit fs(Unit::UNIT_FS);
+						if(data->m_timescale > 1)
+							tooltip += string("Sparsely sampled, ") + fs.PrettyPrint(data->m_timescale) + " resolution\n";
+					}
 				}
 			}
 		}
 		else
 			tooltip += "No waveform\n";
+
+		//Resolution bandwidth of a spectrum, from the FFT it came from (also through Spectrum Stitch, Waterfall etc)
+		auto fft = data ? FindUpstreamFFT(stream) : nullptr;
+		if(fft)
+		{
+			auto rbw = fft->GetRBW();
+			if(rbw > 0)
+			{
+				tooltip += string("RBW ") + fft->GetXAxisUnits().PrettyPrint(rbw) + " (" +
+					FFTFilter::GetWindowName(fft->GetWindowFunction()) + " window)\n";
+			}
+		}
 		tooltip = Trim(tooltip);
 
 		MainWindow::SetTooltipPosition();

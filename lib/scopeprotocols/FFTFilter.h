@@ -100,6 +100,14 @@ public:
 	void SetWindowFunction(WindowFunction f)
 	{ m_parameters[m_windowName].SetIntVal(f); }
 
+	WindowFunction GetWindowFunction()
+	{ return static_cast<WindowFunction>(m_parameters[m_windowName].GetIntVal()); }
+
+	static double GetWindowENBW(WindowFunction f);
+	static std::string GetWindowName(WindowFunction f);
+
+	double GetRBW();
+
 	//Accessors for internal values only used by unit tests
 	//TODO: refactor this into a friend class or something?
 	size_t test_GetNumPoints()
