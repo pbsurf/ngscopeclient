@@ -23,6 +23,10 @@
 # - Tests: Mesa's lavapipe in the container (mesa-vulkan-drivers), VK_ICD_FILENAMES pointing at lvp_icd.
 # - Packaging: tarball (maybe AppImage via linuxdeploy), smoke-test on a stock Debian 12 / Ubuntu 24.04.
 # - Add a CMakePresets.json preset for this instead of the arguments below.
+# - README.md's Downloads section already describes the result: ngscopeclient-linux-x64.tar.gz on the nightly
+#   prerelease, extracting to ngscopeclient/ with the executable ngscopeclient/ngscopeclient, file dialogs through
+#   the desktop portal, the Pico libraries from /opt/picoscope/lib. Make the build match it (or fix the README), and
+#   add the Linux file to the nightly job in build-windows.yml (or move that job to a workflow of its own).
 
 name: Build Linux (draft)
 
@@ -66,9 +70,8 @@ jobs:
     - name: Submodules
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        git submodule update --init --recursive --depth 1 -- \
-          lib/VkFFT lib/canvas_ity lib/xptools \
-          src/ImGuiFileDialog src/imgui_markdown src/nativefiledialog-extended
+        # Everything but doc/upstream (only the manual's images, not needed to build the program)
+        git -c submodule.doc/upstream.update=none submodule update --init --recursive --depth 1
 
     - name: vcpkg at the manifest's baseline
       run: |

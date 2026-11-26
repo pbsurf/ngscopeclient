@@ -44,10 +44,7 @@ jobs:
 
     # Everything but doc/upstream (only the manual's images, not needed to build the program)
     - name: Submodules
-      run: >
-        git submodule update --init --recursive --depth 1 --
-        lib/VkFFT lib/canvas_ity lib/xptools
-        src/ImGuiFileDialog src/imgui_markdown src/nativefiledialog-extended
+      run: git -c submodule.doc/upstream.update=none submodule update --init --recursive --depth 1
 
     - name: vcpkg at the manifest's baseline
       shell: pwsh

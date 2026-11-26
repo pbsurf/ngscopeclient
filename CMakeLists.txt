@@ -50,10 +50,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/release-info.cmake")
 endif ()
 
 #Set up versioning (with a dummy string for now if Git isn't present)
+# Only v* tags are versions (the nightly tag, moved to each CI build of master, is not)
 if(Git_FOUND OR NGSCOPECLIENT_PACKAGE_VERSION)
 	if(NOT NGSCOPECLIENT_PACKAGE_VERSION)
 		execute_process(
-			COMMAND ${GIT_EXECUTABLE} describe --always --tags
+			COMMAND ${GIT_EXECUTABLE} describe --always --tags --match "v[0-9]*"
 			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 			OUTPUT_VARIABLE NGSCOPECLIENT_VERSION
 			OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -65,7 +66,7 @@ if(Git_FOUND OR NGSCOPECLIENT_PACKAGE_VERSION)
 
 	if(NOT NGSCOPECLIENT_PACKAGE_VERSION_LONG)
 		execute_process(
-			COMMAND ${GIT_EXECUTABLE} describe --always --tags --long
+			COMMAND ${GIT_EXECUTABLE} describe --always --tags --long --match "v[0-9]*"
 			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 			OUTPUT_VARIABLE NGSCOPECLIENT_VERSION_LONG
 			OUTPUT_STRIP_TRAILING_WHITESPACE)
