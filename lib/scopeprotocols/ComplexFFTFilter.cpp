@@ -37,10 +37,6 @@ using namespace std;
 
 ComplexFFTFilter::ComplexFFTFilter(const string& color)
 	: FFTFilter(color)
-	, m_fftLength(m_parameters["FFT Length"])
-	, m_cachedNumSegments(0)
-	, m_averageLogMagnitudeComputePipeline(
-		"shaders/ComplexToLogMagnitudeShiftedAverage.spv", 2, sizeof(ComplexAverageLogMagnitudeArgs))
 {
 	//remove base class ports
 	m_inputs.clear();
@@ -65,15 +61,8 @@ ComplexFFTFilter::ComplexFFTFilter(const string& color)
 		"shaders/ComplexCosineSumWindow.spv", 3, sizeof(WindowFunctionArgs));
 	m_complexToLogMagnitudeComputePipeline.Reinitialize(
 		"shaders/ComplexToLogMagnitudeShifted.spv", 2, sizeof(ComplexToMagnitudeArgs));
-
-	//FFT length. Shorter than the input, the input is split into segments overlapping by half, and the power in
-	//each bin is averaged over the segments (Welch's method). Bins are wider, so the noise in each is higher, but a
-	//tone has the same level.
-	m_fftLength = FilterParameter(FilterParameter::TYPE_ENUM, Unit(Unit::UNIT_COUNTS));
-	m_fftLength.AddEnumValue("Whole input", 0);
-	for(int64_t len = 1024; len <= 1048576; len *= 2)
-		m_fftLength.AddEnumValue(to_string(len), len);
-	m_fftLength.SetIntVal(0);
+	m_averageLogMagnitudeComputePipeline.Reinitialize(
+		"shaders/ComplexToLogMagnitudeShiftedAverage.spv", 2, sizeof(AverageLogMagnitudeArgs));
 }
 
 ComplexFFTFilter::~ComplexFFTFilter()
@@ -167,16 +156,10 @@ void ComplexFFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<Queue
 	LogTrace("ComplexFFTFilter: processing %zu input samples\n", ninput);
 
 	//FFT the whole input, or average segments of the FFT length overlapping by half
-	size_t npoints = ninput;
-	size_t nsegments = 1;
-	size_t hop = 0;
-	auto fftlen = static_cast<size_t>(m_fftLength.GetIntVal());
-	if( (fftlen > 0) && (fftlen < ninput) )
-	{
-		npoints = fftlen;
-		hop = fftlen / 2;
-		nsegments = (ninput - fftlen) / hop + 1;
-	}
+	size_t npoints;
+	size_t nsegments;
+	size_t hop;
+	GetSegments(ninput, npoints, nsegments, hop);
 
 	m_xAxisUnit = Unit(Unit::UNIT_MICROHZ);
 	m_cachedNumOuts = npoints;
@@ -330,7 +313,7 @@ void ComplexFFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<Queue
 			}
 			else
 			{
-				ComplexAverageLogMagnitudeArgs cargs;
+				AverageLogMagnitudeArgs cargs;
 				cargs.npoints = npoints;
 				cargs.nsegments = nsegments;
 				cargs.scale = scale * scale / impedance;

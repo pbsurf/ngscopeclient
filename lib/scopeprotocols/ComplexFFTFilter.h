@@ -63,21 +63,6 @@ public:
 
 protected:
 	void ReallocateComplexBuffers(size_t ninput, size_t npoints, size_t nsegments);
-
-	///@brief FFT length: 0 for the whole input, otherwise the length of the overlapping segments averaged
-	FilterParameter& m_fftLength;
-
-	size_t m_cachedNumSegments;
-
-	///@brief Averages the power of the segments' FFTs and converts it to log magnitude
-	ComputePipeline m_averageLogMagnitudeComputePipeline;
-};
-
-struct ComplexAverageLogMagnitudeArgs
-{
-	uint32_t npoints;
-	uint32_t nsegments;
-	float scale;
 };
 
 #endif

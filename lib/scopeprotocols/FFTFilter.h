@@ -46,6 +46,18 @@ struct ComplexToMagnitudeArgs
 	float scale;
 };
 
+///@brief Arguments to the shaders that average the power of a batch of FFTs and convert it to log magnitude
+struct AverageLogMagnitudeArgs
+{
+	///@brief Number of output bins (complex values per FFT in the input)
+	uint32_t npoints;
+
+	///@brief Number of FFTs in the input
+	uint32_t nsegments;
+
+	float scale;
+};
+
 class FFTFilter : public PeakDetectionFilter
 {
 public:
@@ -98,7 +110,9 @@ public:
 
 protected:
 
-	void ReallocateBuffers(size_t npoints_raw, size_t npoints, size_t nouts);
+	void ReallocateBuffers(size_t npoints_raw, size_t npoints, size_t nouts, size_t nsegments = 1);
+
+	void GetSegments(size_t ninput, size_t& npoints, size_t& nsegments, size_t& hop);
 
 	void DoRefresh(
 		WaveformBase* din,
@@ -108,12 +122,15 @@ protected:
 		size_t nouts,
 		bool log_output,
 		vk::raii::CommandBuffer& cmdBuf,
-		std::shared_ptr<QueueHandle> queue
+		std::shared_ptr<QueueHandle> queue,
+		size_t nsegments = 1,
+		size_t hop = 0
 		);
 
 	size_t m_cachedNumPoints;
 	size_t m_cachedNumPointsFFT;
 	size_t m_cachedNumOuts;
+	size_t m_cachedNumSegments;
 	AcceleratorBuffer<float> m_rdinbuf;
 	AcceleratorBuffer<float> m_rdoutbuf;
 
@@ -123,6 +140,9 @@ protected:
 	std::string m_windowName;
 	std::string m_detectorName;
 
+	///@brief FFT length: 0 for the whole input, otherwise the length of the overlapping segments averaged
+	FilterParameter& m_fftLength;
+
 	std::unique_ptr<VulkanFFTPlan> m_vkPlan;
 
 	ComputePipeline m_blackmanHarrisComputePipeline;
@@ -130,6 +150,9 @@ protected:
 	ComputePipeline m_cosineSumComputePipeline;
 	ComputePipeline m_complexToMagnitudeComputePipeline;
 	ComputePipeline m_complexToLogMagnitudeComputePipeline;
+
+	///@brief Averages the power of the segments' FFTs and converts it to log magnitude
+	ComputePipeline m_averageLogMagnitudeComputePipeline;
 };
 
 #endif

@@ -57,6 +57,9 @@ JitterSpectrumFilter::JitterSpectrumFilter(const string& color)
 			make_shared<InputConstraintYUnit>(this, Unit(Unit::UNIT_FS)),
 			make_shared<InputConstraintStreamType>(this, Stream::STREAM_TYPE_ANALOG)
 		});
+
+	//Always the whole input (the averaging is only implemented for log output)
+	m_fftLength.MarkHidden();
 }
 
 JitterSpectrumFilter::~JitterSpectrumFilter()

@@ -44,6 +44,7 @@ add_compute_shaders(
 		ComplexRectangularWindow.glsl
 		ComplexSpectrogramPostprocess.glsl
 		ComplexToLogMagnitude.glsl
+		ComplexToLogMagnitudeAverage.glsl
 		ComplexToLogMagnitudeShifted.glsl
 		ComplexToLogMagnitudeShiftedAverage.glsl
 		ComplexToMagnitude.glsl
