@@ -1,0 +1,137 @@
+# Windows build: MSVC + vcpkg, with the pico transport (Pico SDK headers fetched from Pico's apt repo).
+# Produces a zip of the program folder (exe, DLLs, data folders) and a separate pdb artifact.
+# The unit tests aren't run yet: they need Vulkan and the runners have no GPU (would need a software driver,
+# e.g. Mesa's lavapipe for Windows).
+
+name: Build Windows
+
+on:
+  push:
+    branches: [master]
+    paths-ignore: ['doc/**', 'devdoc/**', '**.md', 'release-notes/**']
+  pull_request:
+    paths-ignore: ['doc/**', 'devdoc/**', '**.md', 'release-notes/**']
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run still going
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  msvc:
+    # VS 2022, as used locally (msvc/install-buildtools.ps1)
+    runs-on: windows-2022
+    timeout-minutes: 240
+
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
+      VCPKG_DISABLE_METRICS: 1
+
+    steps:
+    - name: Check out
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0      # git describe gives the version string
+        submodules: false
+
+    # Everything but doc/upstream (only the manual's images, not needed to build the program)
+    - name: Submodules
+      run: >
+        git submodule update --init --recursive --depth 1 --
+        lib/VkFFT lib/canvas_ity lib/xptools
+        src/ImGuiFileDialog src/imgui_markdown src/nativefiledialog-extended
+
+    - name: vcpkg at the manifest's baseline
+      shell: pwsh
+      run: |
+        $baseline = (Get-Content msvc/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+        git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+        git -C "$env:VCPKG_ROOT" checkout --quiet $baseline
+        & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        New-Item -ItemType Directory -Force "${{ github.workspace }}\vcpkg-binary-cache" | Out-Null
+
+    # vcpkg's built packages. vcpkg checks each package's ABI hash itself, so a cache from an older manifest is
+    # safe to start from; a new entry is saved only when the manifest or ports changed.
+    - name: Restore vcpkg binary cache
+      id: vcpkg-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: vcpkg-binary-cache
+        key: vcpkg-windows-${{ hashFiles('msvc/vcpkg.json', 'msvc/ports/**') }}
+        restore-keys: vcpkg-windows-
+
+    - name: Compiler cache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: windows-msvc
+        max-size: 2G
+
+    - name: Pico SDK headers
+      run: python scripts/ci/fetch-pico-headers.py "${{ runner.temp }}\pico-sdk-inc"
+
+    - name: MSVC environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    # Embedded debug info (/Z7 instead of /Zi) so ccache can cache the objects; the linker still writes the pdb.
+    # CMP0141 is newer than the project's cmake_minimum_required, so set its default to make CMake honour that.
+    - name: Configure
+      run: >
+        cmake --preset windows-msvc
+        -DPICO_SDK_INCLUDE_DIR="${{ runner.temp }}\pico-sdk-inc"
+        -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
+        -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+    - name: Save vcpkg binary cache
+      if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: vcpkg-binary-cache
+        key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+    - name: Build
+      run: cmake --build --preset windows-msvc
+
+    - name: Check the pico transport was built
+      shell: pwsh
+      run: |
+        if (-not (Select-String -Quiet -Path build\windows-msvc\CMakeCache.txt -Pattern '^PICO_ps6000a_INCLUDE_DIR:PATH=.+')) {
+          throw "Pico SDK headers not found by CMake"
+        }
+
+    - name: Package
+      shell: pwsh
+      run: |
+        $src = "build\windows-msvc\src\ngscopeclient"
+        $dst = "dist\ngscopeclient"
+        # robocopy: exit codes below 8 mean success
+        robocopy $src $dst /E /NFL /NDL /NJH /NJS /XD CMakeFiles /XF *.cmake *.exp *.ilk *.lib *.pdb ngscopeclient-version.h
+        if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+        Copy-Item LICENSE $dst
+        New-Item -ItemType Directory -Force dist\pdb | Out-Null
+        Copy-Item "$src\ngscopeclient.pdb" dist\pdb
+        $sha = "${{ github.sha }}".Substring(0, 8)
+        "ARTIFACT_SUFFIX=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        exit 0
+
+    - name: Upload program
+      uses: actions/upload-artifact@v4
+      with:
+        name: ngscopeclient-windows-x64-${{ env.ARTIFACT_SUFFIX }}
+        path: dist/ngscopeclient
+        if-no-files-found: error
+
+    - name: Upload pdb
+      uses: actions/upload-artifact@v4
+      with:
+        name: ngscopeclient-windows-x64-${{ env.ARTIFACT_SUFFIX }}-pdb
+        path: dist/pdb
+        if-no-files-found: error
