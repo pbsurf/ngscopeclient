@@ -47,7 +47,7 @@ get_target_property(Vulkan_INCLUDE_DIR Vulkan::Headers INTERFACE_INCLUDE_DIRECTO
 if (Git_FOUND OR SCOPEHAL_PACKAGE_VERSION)
     if(NOT SCOPEHAL_PACKAGE_VERSION)
         execute_process(
-                    COMMAND ${GIT_EXECUTABLE} describe --always --tags
+                    COMMAND ${GIT_EXECUTABLE} describe --always --tags --match "v[0-9]*"
                     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                     OUTPUT_VARIABLE SCOPEHAL_VERSION
                     OUTPUT_STRIP_TRAILING_WHITESPACE)

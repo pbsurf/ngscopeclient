@@ -1285,16 +1285,11 @@ void Session::DropInstrument(const YAML::Node& node, const string& types)
 	LogError("offline loading of %s not implemented yet, leaving out \"%s\"\n", types.c_str(), nick.c_str());
 	m_droppedInstruments.push_back(nick);
 
-	string msg =
-		string("Couldn't load \"") + nick + "\": it isn't connected and offline loading of " + types +
-		" is not implemented yet, so it was left out of this session, along with its waveform views.";
+	string msg = string("\"") + nick + "\" wasn't found and was left out of this session.\n"
+		"Saving the session would remove it from the file.";
 	if(GetPreferences().GetBool("Files.save_config_on_exit"))
-	{
-		msg +=
-			"\n\nThe configuration won't be saved on exit, so the session file keeps it. Saving the session "
-			"yourself removes it from the file.";
-	}
-	m_mainWindow->ShowErrorPopup("Instrument left out", msg);
+		msg += " Save on exit is skipped.";
+	m_mainWindow->ShowErrorPopup("Instrument not found", msg);
 }
 
 bool Session::PreLoadOscilloscope(int version, const YAML::Node& node, bool online)

@@ -44,8 +44,9 @@ class MainWindow;
 /**
 	@brief Table of the peaks found by one peak detecting filter (FFT, Spectrum Stitch, Peaks, etc)
 
-	Shows the peaks the plots label, and the next few candidates, and sets how many are labeled (the filter's Number
-	of Peaks). Hovering a row highlights the peak on the plots, clicking it centers them on it.
+	Shows the peaks the plots label, and the next few candidates, and sets how many are labeled and how far apart
+	they must be (the filter's Number of Peaks and Peak Window). Hovering a row highlights the peak on the plots,
+	clicking it centers them on it, and the right click menu copies the table as CSV.
 
 	The dialog is a sink of the filter, so it goes away when the filter is deleted, and the filter keeps searching for
 	peaks while it's open even if none are labeled.
@@ -78,6 +79,15 @@ protected:
 	};
 
 	void CopyAsCSV(const std::vector<Row>& rows, Unit xunit, Unit yunit);
+
+	///@brief Text of the Peak Window box
+	std::string m_peakWindowText;
+
+	///@brief Peak Window value last applied, or read from the filter
+	float m_committedPeakWindow;
+
+	///@brief True if the Peak Window box was being edited in the last frame (don't update it from the filter then)
+	bool m_peakWindowEditing;
 };
 
 #endif

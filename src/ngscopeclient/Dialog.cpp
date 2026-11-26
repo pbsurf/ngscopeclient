@@ -190,6 +190,40 @@ void Dialog::HelpMarker(const string& str)
 }
 
 /**
+	@brief Puts the next item on the same line as the previous one if it fits in the window, else on a new line
+
+	ImGui doesn't wrap rows: what doesn't fit past the right edge is just clipped. Use this instead of SameLine() for
+	rows of controls that may be wider than the window.
+
+	@param width	Width of the next item, or of the items that should stay together (see LabeledItemWidth())
+ */
+void Dialog::SameLineIfFits(float width)
+{
+	ImGui::SameLine();
+	if(ImGui::GetContentRegionAvail().x < width)
+		ImGui::NewLine();
+}
+
+/**
+	@brief Width of an input with its label on the right, as ImGui draws them, for SameLineIfFits()
+
+	@param itemWidth	Width of the input itself (as given to SetNextItemWidth())
+	@param label		The label (anything from "##" on isn't shown)
+	@param helpMarker	True to include a HelpMarker() after the label
+ */
+float Dialog::LabeledItemWidth(float itemWidth, const string& label, bool helpMarker)
+{
+	auto& style = ImGui::GetStyle();
+	float w = itemWidth;
+	float labelWidth = ImGui::CalcTextSize(label.c_str(), nullptr, true).x;
+	if(labelWidth > 0)
+		w += style.ItemInnerSpacing.x + labelWidth;
+	if(helpMarker)
+		w += style.ItemSpacing.x + ImGui::CalcTextSize("(?)").x;
+	return w;
+}
+
+/**
 	@brief Helper based on imgui demo for displaying tooltip text over the previously rendered widget
  */
 void Dialog::Tooltip(const string& str, bool allowDisabled)

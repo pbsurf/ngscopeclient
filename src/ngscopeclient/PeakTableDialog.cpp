@@ -49,6 +49,8 @@ PeakTableDialog::PeakTableDialog(PeakDetectionFilter* filter, Session* session, 
 		ImVec2(450, 300),
 		session,
 		parent)
+	, m_committedPeakWindow(-1)
+	, m_peakWindowEditing(false)
 {
 	CreateInput("filter");
 	SetInput(0, StreamDescriptor(filter, 0));
@@ -80,7 +82,7 @@ bool PeakTableDialog::DoRender()
 	auto& param = f->GetParameter("Number of Peaks");
 	int n = static_cast<int>(max(param.GetIntVal(), (int64_t)0));
 	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
-	if(ImGui::InputInt("Labeled peaks", &n))
+	if(ImGui::InputInt("Labeled", &n))
 	{
 		n = max(n, 0);
 		param.SetIntVal(n);
@@ -90,7 +92,30 @@ bool PeakTableDialog::DoRender()
 	}
 	HelpMarker(
 		"How many peaks are labeled on the plots of this filter (its Number of Peaks). The table also shows the "
-		"next few peaks, dimmed.");
+		"next few peaks, dimmed. Right click the table to copy it.");
+
+	//Minimum spacing between peaks, also the filter's parameter. Follows changes made elsewhere (filter properties)
+	//unless it's being edited here.
+	auto& winparam = f->GetParameter("Peak Window");
+	Unit winunit = winparam.GetUnit();
+	if(!m_peakWindowEditing && (winparam.GetFloatVal() != m_committedPeakWindow))
+	{
+		m_committedPeakWindow = winparam.GetFloatVal();
+		m_peakWindowText = winunit.PrettyPrint(m_committedPeakWindow);
+	}
+	const string winlabel = "Window";
+	float winwidth = ImGui::GetFontSize() * 6;
+	SameLineIfFits(LabeledItemWidth(winwidth, winlabel, true));
+	ImGui::SetNextItemWidth(winwidth);
+	if(UnitInputWithImplicitApply(winlabel, m_peakWindowText, m_committedPeakWindow, winunit))
+	{
+		winparam.SetFloatVal(m_committedPeakWindow);
+		m_session->RefreshAllFiltersNonblocking();
+	}
+	m_peakWindowEditing = ImGui::IsItemActive();
+	HelpMarker(
+		"Minimum spacing between peaks: a peak is the highest point within half this distance on each side "
+		"(the filter's Peak Window, for all of its plots).");
 
 	//Copy the peaks, under the same lock the plots read them with
 	vector<Row> rows;
@@ -115,11 +140,6 @@ bool PeakTableDialog::DoRender()
 	auto labeled = m_parent->GetPeakLabelPositions(f);
 	for(auto& r : rows)
 		r.m_labeled = (labeled.find(r.m_x) != labeled.end());
-
-	ImGui::SameLine();
-	if(ImGui::Button("Copy"))
-		CopyAsCSV(rows, xunit, yunit);
-	Tooltip("Copy the table to the clipboard as CSV");
 
 	if(rows.empty())
 	{
@@ -208,6 +228,7 @@ bool PeakTableDialog::DoRender()
 		{
 			m_parent->SetHighlightedPeak(f, r.m_x, r.m_y);
 			m_parent->AddStatusHelp("mouse_lmb", "Center the plot on this peak");
+			m_parent->AddStatusHelp("mouse_rmb", "Copy menu");
 		}
 
 		ImGui::TableSetColumnIndex(COL_X);
@@ -245,6 +266,16 @@ bool PeakTableDialog::DoRender()
 	}
 
 	ImGui::EndTable();
+
+	//Right click anywhere in the window (the table scrolls in a child window of its own)
+	if(ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+		ImGui::OpenPopup("PeakTableMenu");
+	if(ImGui::BeginPopup("PeakTableMenu"))
+	{
+		if(ImGui::MenuItem("Copy as CSV"))
+			CopyAsCSV(rows, xunit, yunit);
+		ImGui::EndPopup();
+	}
 
 	return true;
 }

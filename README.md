@@ -66,7 +66,7 @@ Extract it with `tar xf ngscopeclient-linux-x64.tar.gz`, keeping the files toget
 * The channel tooltip of a spectrum shows its RBW (resolution bandwidth, including the window's noise bandwidth), also through Spectrum Stitch and Waterfall
 * Detector setting (Normal/Peak/Average) for drawing FFT and Spectrum Stitch
 * Peak Select filter: outputs the frequency, level and FWHM of one detected peak as scalars, chosen by rank, within a range of a target, or nearest to it
-* Peak Table window for FFT, Spectrum Stitch and Peaks filters (plot context menu or Window menu): lists the labeled peaks and the next few, sets how many are labeled, highlights a peak on the plot on hover and centers on it on click, and copies as CSV
+* Peak Table window for FFT, Spectrum Stitch and Peaks filters (plot context menu or Window menu): lists the labeled peaks and the next few, sets how many are labeled and the Peak Window, highlights a peak on the plot on hover and centers on it on click, and copies as CSV (right click)
 * Markers at the plot edge for spectrum peaks scrolled out of view, and FFT peak labels that hold still on noisy spectra
 * Peak markers show frequency to a tenth of a bin, and FWHM as an upper bound at the two-bin minimum
 * Faster peak search when the Peak Window spans many bins (8.0 to 2.1 ms on a 1M point spectrum)
