@@ -97,10 +97,12 @@ Extract it with `tar xf ngscopeclient-linux-x64.tar.gz`, keeping the files toget
 * Recent Instruments section in Manage Instruments
 * Instruments that can't be connected and have no offline driver (SDRs, function generators, etc.) are named in a popup, and the save on exit is skipped while they're missing, so they aren't dropped from the session file
 
-### Windows build and CI
+### Windows and Linux builds and CI
 
 * Native Windows build with MSVC (vcpkg manifest and CMake presets), including the AVX code paths
-* GitHub Actions builds Windows on every push to master, with the pico transport, and publishes it as the [nightly prerelease](#downloads)
+* Portable Linux build (manylinux_2_28 container, dependencies from the same vcpkg manifest), runs on glibc 2.28+
+* GitHub Actions builds Windows and Linux on every push to master, with the pico transport, runs the unit tests on
+  Linux (on Mesa's software Vulkan), and publishes both as the [nightly prerelease](#downloads)
 
 ## Minor features and bug fixes
 
@@ -200,6 +202,13 @@ cmake --build build
 The program is `build/src/ngscopeclient/ngscopeclient`. Older distributions (Ubuntu 22.04) need the
 [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) instead of the Vulkan packages: source its `setup-env.sh` before
 running cmake.
+
+**Linux, portable (as CI builds it):** `scripts/ci/linux-container.sh` runs `scripts/ci/build-linux.sh` in the
+manylinux_2_28 container with podman or docker, and leaves `dist/ngscopeclient-linux-x64.tar.gz`. The first run
+builds the dependencies with vcpkg, which takes a while; vcpkg and its caches are kept in
+`~/.cache/ngscopeclient-ci`. Steps can be run on their own (`scripts/ci/linux-container.sh build package`, or
+`shell` for a shell in the container). The unit tests run outside the container, from the test bundle the package
+step also makes (`dist/ngscopeclient-linux-x64-tests.tar.gz`; see the top of `scripts/ci/linux-container.sh`).
 
 **PicoScope (pico transport):** built when CMake finds the PicoSDK headers, in the SDK's default place
 (`C:\Program Files\Pico Technology\SDK\inc`, or `/opt/picoscope/include` from Pico's Linux packages such as

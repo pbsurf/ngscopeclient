@@ -1,37 +1,28 @@
-# DRAFT, not yet run. Linux build: manylinux_2_28 (AlmaLinux 8, glibc 2.28, gcc-toolset) + vcpkg (static
-# libraries, same manifest as the Windows build), so the binary runs on any distro with glibc >= 2.28 (Debian 10+,
-# Ubuntu 20.04+, RHEL 8+, ...). Only glibc, libstdc++, the Vulkan loader, libdbus and what SDL2 loads at run time
-# (X11/Wayland) come from the user's system.
+# Portable Linux x64 build: manylinux_2_28 (AlmaLinux 8, glibc 2.28, gcc-toolset) + vcpkg (static libraries, the
+# same manifest as the Windows build), so the program runs on any distro with glibc >= 2.28 (Debian 10+,
+# Ubuntu 20.04+, RHEL 8+, ...). The steps are in scripts/ci/build-linux.sh, and scripts/ci/linux-container.sh runs
+# them locally in the same container.
 #
-# Only runs when started by hand (workflow_dispatch) until it's been finished from a Linux session. The Linux build
-# hasn't been tried since the MSVC port and the monorepo merge, so expect GCC fixes first.
-#
-# TODO (to check/finish on Linux):
-# - Which system -devel packages the vcpkg ports need (SDL2's X11/Wayland backends, hidapi's libudev, libiio's
-#   libusb/libxml2 are from vcpkg). The dnf list below is a guess.
-# - The Vulkan loader must be the system's libvulkan.so.1 (it loads the GPU drivers). vcpkg's vulkan-loader port
-#   on the static x64-linux-release triplet may not give that; maybe an overlay triplet with dynamic linkage for
-#   vulkan-loader only, or drop it from the manifest on Linux and dlopen/link the system one.
-# - OpenMP: check what gcc-toolset's libgomp links to (should be the system libgomp.so.1).
-# - libscopehal/libscopeprotocols are SHARED on Linux: ship them next to the exe with RPATH $ORIGIN (or make them
-#   static on Linux too).
-# - CMakeLists.txt's CPack section requires lsb_release on Linux (redhat-lsb-core below), and would label the
-#   package with the build distro (AlmaLinux), which is wrong for a portable build.
-# - NFD_PORTAL=ON (xdg-desktop-portal over D-Bus) so GTK3 isn't needed. The top-level CMakeLists.txt still
-#   requires gtk+-3.0 on Linux (pkg_check_modules ... REQUIRED, "file browser dialog"); make that conditional,
-#   then drop gtk3-devel below.
-# - Tests: Mesa's lavapipe in the container (mesa-vulkan-drivers), VK_ICD_FILENAMES pointing at lvp_icd.
-# - Packaging: tarball (maybe AppImage via linuxdeploy), smoke-test on a stock Debian 12 / Ubuntu 24.04.
-# - Add a CMakePresets.json preset for this instead of the arguments below.
-# - README.md's Downloads section already describes the result: ngscopeclient-linux-x64.tar.gz on the nightly
-#   prerelease, extracting to ngscopeclient/ with the executable ngscopeclient/ngscopeclient, file dialogs through
-#   the desktop portal, the Pico libraries from /opt/picoscope/lib. Make the build match it (or fix the README), and
-#   add the Linux file to the nightly job in build-windows.yml (or move that job to a workflow of its own).
+# Produces ngscopeclient-linux-x64.tar.gz (extracting to ngscopeclient/, the executable ngscopeclient/ngscopeclient).
+# The unit tests run in a second job on a stock Ubuntu runner, on Mesa's software Vulkan driver (lavapipe): EL8's
+# lavapipe fails to create an instance, and running the manylinux binaries on another distro checks that they're
+# portable. Pushes to master also put the tarball on the "nightly" prerelease, next to the Windows zip
+# (build-windows.yml, which also moves the nightly tag and writes the release notes).
 
-name: Build Linux (draft)
+name: Build Linux
 
 on:
+  push:
+    branches: [master]
+    paths-ignore: ['doc/**', 'devdoc/**', '**.md', 'release-notes/**']
+  pull_request:
+    paths-ignore: ['doc/**', 'devdoc/**', '**.md', 'release-notes/**']
   workflow_dispatch:
+
+# A newer push to the same branch cancels the run still going
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -41,46 +32,39 @@ jobs:
     runs-on: ubuntu-24.04
     container: quay.io/pypa/manylinux_2_28_x86_64
     timeout-minutes: 240
+    outputs:
+      suffix: ${{ steps.suffix.outputs.suffix }}
 
     env:
       VCPKG_ROOT: /opt/vcpkg
       VCPKG_BINARY_SOURCES: clear;files,/__w/vcpkg-binary-cache,readwrite
-      VCPKG_DISABLE_METRICS: 1
-      VCPKG_FORCE_SYSTEM_BINARIES: 0
+      CCACHE_DIR: /__w/ccache
+      CCACHE_MAXSIZE: 2G
 
     steps:
-    - name: System packages
-      run: |
-        dnf install -y epel-release
-        dnf install -y --enablerepo=powertools \
-          git curl zip unzip tar ninja-build ccache perl-IPC-Cmd autoconf automake libtool kernel-headers \
-          libX11-devel libXext-devel libXrandr-devel libXcursor-devel libXi-devel libXinerama-devel \
-          libXfixes-devel libXScrnSaver-devel libxkbcommon-devel wayland-devel wayland-protocols-devel \
-          mesa-libEGL-devel mesa-libGL-devel gtk3-devel dbus-devel systemd-devel redhat-lsb-core \
-          mesa-vulkan-drivers
-        python3 -m pip install --upgrade cmake
-        gcc --version
-
     - name: Check out
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 0      # git describe gives the version string
         submodules: false
 
+    # The workspace is owned by the runner's user, not the container's root
     - name: Submodules
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         # Everything but doc/upstream (only the manual's images, not needed to build the program)
         git -c submodule.doc/upstream.update=none submodule update --init --recursive --depth 1
 
+    - name: System packages
+      run: scripts/ci/build-linux.sh deps
+
     - name: vcpkg at the manifest's baseline
       run: |
-        baseline=$(python3 -c "import json; print(json.load(open('msvc/vcpkg.json'))['builtin-baseline'])")
-        git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
-        git -C "$VCPKG_ROOT" checkout --quiet "$baseline"
-        "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+        scripts/ci/build-linux.sh vcpkg
         mkdir -p /__w/vcpkg-binary-cache
 
+    # vcpkg's built packages. vcpkg checks each package's ABI hash itself, so a cache from an older manifest is
+    # safe to start from; a new entry is saved only when the manifest or ports changed.
     - name: Restore vcpkg binary cache
       id: vcpkg-cache
       uses: actions/cache/restore@v4
@@ -96,28 +80,8 @@ jobs:
         key: ccache-manylinux-${{ github.run_id }}
         restore-keys: ccache-manylinux-
 
-    - name: Pico SDK headers
-      run: python3 scripts/ci/fetch-pico-headers.py "$RUNNER_TEMP/pico-sdk-inc"
-
     - name: Configure
-      env:
-        CCACHE_DIR: /__w/ccache
-      run: |
-        cmake -S . -B build/linux -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DVCPKG_MANIFEST_DIR="$PWD/msvc" \
-          -DVCPKG_TARGET_TRIPLET=x64-linux-release \
-          -DVCPKG_HOST_TRIPLET=x64-linux-release \
-          "-DVCPKG_MANIFEST_FEATURES=iio" \
-          -DPKG_CONFIG_EXECUTABLE="$PWD/build/linux/vcpkg_installed/x64-linux-release/tools/pkgconf/pkgconf" \
-          -DVulkan_GLSLC_EXECUTABLE="$PWD/build/linux/vcpkg_installed/x64-linux-release/tools/shaderc/glslc" \
-          -DPICO_SDK_INCLUDE_DIR="$RUNNER_TEMP/pico-sdk-inc" \
-          -DREQUIRE_PICO=ON \
-          -DNFD_PORTAL=ON \
-          -DBUILD_TESTING=OFF \
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      run: scripts/ci/build-linux.sh configure
 
     - name: Save vcpkg binary cache
       if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -127,30 +91,92 @@ jobs:
         key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
     - name: Build
-      env:
-        CCACHE_DIR: /__w/ccache
-        CCACHE_MAXSIZE: 2G
-      run: cmake --build build/linux
-
-    - name: Show dynamic dependencies
       run: |
-        ldd build/linux/src/ngscopeclient/ngscopeclient
-        objdump -T build/linux/src/ngscopeclient/ngscopeclient | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+        scripts/ci/build-linux.sh build
+        ccache -s
 
-    # TODO: package properly (see the top of this file)
+    - name: Package
+      run: scripts/ci/build-linux.sh package
+
+    - name: Artifact name
+      id: suffix
+      run: |
+        sha=$(echo "$GITHUB_SHA" | cut -c1-8)
+        echo "ARTIFACT_SUFFIX=$sha" >> "$GITHUB_ENV"
+        echo "suffix=$sha" >> "$GITHUB_OUTPUT"
+
+    # The tarball, not the folder: artifacts are zipped, which would lose the executable bits
     - name: Upload program
       uses: actions/upload-artifact@v4
       with:
-        name: ngscopeclient-linux-x64-draft
-        path: |
-          build/linux/src/ngscopeclient/ngscopeclient
-          build/linux/src/ngscopeclient/channels
-          build/linux/src/ngscopeclient/fonts
-          build/linux/src/ngscopeclient/icons
-          build/linux/src/ngscopeclient/masks
-          build/linux/src/ngscopeclient/md
-          build/linux/src/ngscopeclient/shaderfusion
-          build/linux/src/ngscopeclient/shaders
-          build/linux/lib/scopehal/libscopehal.so
-          build/linux/lib/scopeprotocols/libscopeprotocols.so
+        name: ngscopeclient-linux-x64-${{ env.ARTIFACT_SUFFIX }}
+        path: dist/ngscopeclient-linux-x64.tar.gz
         if-no-files-found: error
+
+    - name: Upload tests
+      uses: actions/upload-artifact@v4
+      with:
+        name: ngscopeclient-linux-x64-${{ env.ARTIFACT_SUFFIX }}-tests
+        path: dist/ngscopeclient-linux-x64-tests.tar.gz
+        if-no-files-found: error
+        retention-days: 7
+
+  # The unit tests, built in the manylinux job, on a stock distro with Mesa's lavapipe
+  test:
+    needs: manylinux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+    - name: Check out the scripts
+      uses: actions/checkout@v4
+      with:
+        sparse-checkout: scripts/ci
+
+    - name: Vulkan (lavapipe)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 libgomp1 libx11-6 \
+          libwayland-client0 libdbus-1-3 libudev1
+
+    - name: Download tests
+      uses: actions/download-artifact@v4
+      with:
+        name: ngscopeclient-linux-x64-${{ needs.manylinux.outputs.suffix }}-tests
+        path: dist
+
+    - name: Test
+      run: |
+        mkdir tests-bundle
+        tar -C tests-bundle -xzf dist/ngscopeclient-linux-x64-tests.tar.gz
+        TEST_DIR="$PWD/tests-bundle" scripts/ci/build-linux.sh test
+
+  # Puts the tarball on the rolling "nightly" prerelease (see build-windows.yml, which makes the release, moves its
+  # tag and writes its notes). Same concurrency group as the Windows upload, so the two don't race.
+  nightly:
+    needs: [manylinux, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+    - name: Download program
+      uses: actions/download-artifact@v4
+      with:
+        name: ngscopeclient-linux-x64-${{ needs.manylinux.outputs.suffix }}
+        path: dist
+
+    - name: Update the nightly release
+      run: |
+        if ! gh release view nightly > /dev/null 2>&1; then
+          gh release create nightly --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Nightly build" --notes "Latest build of master: ${GITHUB_SHA::8}. Unreleased development build, replaced by every push to master."
+        fi
+        gh release upload nightly dist/ngscopeclient-linux-x64.tar.gz --clobber

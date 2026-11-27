@@ -18,8 +18,18 @@
       ]
     },
     "hidapi",
+    {
+      "name": "dbus",
+      "$comment": "For SDL2 and the file dialogs' xdg-desktop-portal backend on Linux. Without the systemd feature, which would build a static libsystemd: libdbus finds the session bus without it",
+      "default-features": false,
+      "platform": "linux"
+    },
     "vulkan-headers",
-    "vulkan-loader",
+    {
+      "name": "vulkan-loader",
+      "$comment": "On Linux the system's libvulkan.so.1 is used, since it's what finds the GPU drivers",
+      "platform": "!linux"
+    },
     "glslang",
     "spirv-tools",
     "shaderc",

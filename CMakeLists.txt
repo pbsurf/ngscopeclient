@@ -256,9 +256,12 @@ if(NVTX_PATH)
 	endif()
 endif()
 
-# We still use gtk on Linux for the file browser dialog in "native" mode)
+# We still use gtk on Linux for the file browser dialog in "native" mode, unless nativefiledialog-extended uses
+# xdg-desktop-portal instead (NFD_PORTAL, as the portable CI build does)
 if(LINUX)
-	pkg_check_modules(GTK QUIET IMPORTED_TARGET REQUIRED gtk+-3.0)
+	if(NOT NFD_PORTAL)
+		pkg_check_modules(GTK QUIET IMPORTED_TARGET REQUIRED gtk+-3.0)
+	endif()
 	pkg_search_module(WAYLAND_CLIENT wayland-client IMPORTED_TARGET GLOBAL REQUIRED)
 endif()
 
@@ -358,11 +361,18 @@ add_subdirectory("${PROJECT_SOURCE_DIR}/lib/picobridge")	# before scopehal, whic
 add_subdirectory("${PROJECT_SOURCE_DIR}/lib/scopehal")
 add_subdirectory("${PROJECT_SOURCE_DIR}/lib/scopeprotocols")
 add_subdirectory("${PROJECT_SOURCE_DIR}/lib/xptools")
-if(MSVC)
-	# xptools includes <hidapi/hidapi.h>, but hidapi.pc's include dir is <prefix>/include/hidapi
-	# (MSYS2 and Linux get <prefix>/include from the compiler's default search path)
+# xptools includes <hidapi/hidapi.h>, but hidapi.pc's include dir is <prefix>/include/hidapi. Distro packages get
+# <prefix>/include from the compiler's default search path, vcpkg's prefix (MSVC, the portable Linux build) doesn't.
+# Only added there, so distro builds' compile flags (and object files) stay as they are.
+if(MSVC OR VCPKG_TOOLCHAIN)
 	target_include_directories(xptools SYSTEM PUBLIC "${HIDAPI_INCLUDEDIR}")
-
+endif()
+if(VCPKG_TOOLCHAIN AND LINUX)
+	# vcpkg's hidapi is static, and its .pc file doesn't say it needs libudev; its CMake target does
+	find_package(hidapi CONFIG REQUIRED)
+	target_link_libraries(xptools PUBLIC hidapi::hidraw)
+endif()
+if(MSVC)
 	# lib/log (upstream logtools) always builds a DLL on Windows, which would need symbol exports under MSVC
 	include(msvc/log.cmake)
 else()
@@ -399,6 +409,10 @@ set_property(TARGET scopehal PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET log PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET xptools PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET scopeprotocols PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(TARGET picobridge)
+	# Static, linked into libscopehal.so
+	set_property(TARGET picobridge PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # CPack package generation
 set(CPACK_PACKAGE_NAME "ngscopeclient")
@@ -410,9 +424,12 @@ set(CPACK_PACKAGE_HOMEPAGE_URL "https://www.ngscopeclient.org/")
 set(CPACK_THREADS 0)
 set(CPACK_STRIP_FILES TRUE)
 
-# Figure out what distro version we're on
+# Figure out what distro version we're on (only for CPack's distro packages; the portable CI build has no
+# lsb_release and packages itself)
 if(LINUX)
-	find_program(LSB_RELEASE_EXEC lsb_release REQUIRED)
+	find_program(LSB_RELEASE_EXEC lsb_release)
+endif()
+if(LINUX AND LSB_RELEASE_EXEC)
 	execute_process(COMMAND ${LSB_RELEASE_EXEC} -is
 		OUTPUT_VARIABLE DISTRO_NAME
 		OUTPUT_STRIP_TRAILING_WHITESPACE

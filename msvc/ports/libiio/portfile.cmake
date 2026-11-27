@@ -20,6 +20,15 @@ vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
 # libiio finds libusb via pkg-config first (with a find_library fallback)
 vcpkg_find_acquire_program(PKGCONFIG)
 
+# DNS-SD (finding radios on the network, e.g. ip:pluto.local in a scan) uses the bundled mdns code on Windows, but
+# avahi on Linux, which a portable build can't count on. Without it, ip: URIs still work (the system resolver
+# handles .local names through nss-mdns where it's set up), and USB scanning is unaffected.
+if(VCPKG_TARGET_IS_LINUX)
+    set(DNS_SD OFF)
+else()
+    set(DNS_SD ON)
+endif()
+
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
@@ -27,8 +36,7 @@ vcpkg_cmake_configure(
         "-DPKG_CONFIG_EXECUTABLE=${PKGCONFIG}"
         -DWITH_NETWORK_BACKEND=ON
         -DWITH_XML_BACKEND=ON
-        # On Windows this uses the bundled mdns code, no extra dependency
-        -DHAVE_DNS_SD=ON
+        "-DHAVE_DNS_SD=${DNS_SD}"
         -DWITH_SERIAL_BACKEND=OFF
         -DWITH_ZSTD=OFF
         # Linux-only server side and system integration, not needed by a client
@@ -73,6 +81,23 @@ if(VCPKG_LIBRARY_LINKAGE STREQUAL "static")
     vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/include/iio.h"
         "#   ifdef LIBIIO_STATIC"
         "#   if 1 /* vcpkg: static build */")
+endif()
+
+# A static libiio needs its dependencies at link time, but upstream's .pc file doesn't name them
+if(VCPKG_LIBRARY_LINKAGE STREQUAL "static")
+    set(IIO_PC_REQUIRES "libxml-2.0")
+    if("usb" IN_LIST FEATURES)
+        string(APPEND IIO_PC_REQUIRES " libusb-1.0")
+    endif()
+    foreach(pc IN ITEMS
+            "${CURRENT_PACKAGES_DIR}/lib/pkgconfig/libiio.pc"
+            "${CURRENT_PACKAGES_DIR}/debug/lib/pkgconfig/libiio.pc")
+        if(EXISTS "${pc}")
+            file(READ "${pc}" PC_CONTENTS)
+            string(REGEX REPLACE "\nRequires:[^\n]*" "\nRequires: ${IIO_PC_REQUIRES}" PC_CONTENTS "${PC_CONTENTS}")
+            file(WRITE "${pc}" "${PC_CONTENTS}")
+        endif()
+    endforeach()
 endif()
 
 vcpkg_fixup_pkgconfig()

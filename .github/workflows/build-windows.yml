@@ -189,6 +189,8 @@ jobs:
         Windows x64: unzip and run ngscopeclient.exe. PicoScopes (pico transport) need the PicoSDK installed from Pico Technology.
         Debug symbols (for crash dumps): the pdb artifact of the run linked above (needs a GitHub login).
 
+        Linux x64 (glibc 2.28 or later): tar xf ngscopeclient-linux-x64.tar.gz and run ngscopeclient/ngscopeclient. It needs a Vulkan driver; PicoScopes need Pico's driver packages in /opt/picoscope. Built by the Linux workflow, which can finish before or after this one.
+
         Unreleased development build, replaced by every push to master."
 
         if ! gh release view nightly > /dev/null 2>&1; then
