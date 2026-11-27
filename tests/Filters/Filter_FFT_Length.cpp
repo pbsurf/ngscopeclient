@@ -130,7 +130,7 @@ TEST_CASE("Filter_FFT_Length")
 		REQUIRE(out->m_timescale == llround(sampleRate / npoints * 1e6));
 
 		size_t peak = FindPeakBin(out);
-		REQUIRE(peak == llround(toneHz * npoints / sampleRate));
+		REQUIRE(static_cast<long long>(peak) == llround(toneHz * npoints / sampleRate));
 		double peakHz = (out->m_triggerPhase + static_cast<int64_t>(peak) * out->m_timescale) / 1e6;
 		REQUIRE(fabs(peakHz - toneHz) < 1);
 		REQUIRE(fabs(out->m_samples[peak] - expectedDbm) < 0.3);

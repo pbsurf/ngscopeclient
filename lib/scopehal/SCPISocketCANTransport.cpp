@@ -210,17 +210,15 @@ size_t SCPISocketCANTransport::ReadPacket(can_frame* frame, int64_t& sec, int64_
 		if(pmsg->cmsg_type != SCM_TIMESTAMPNS)
 			continue;
 
-		scm_timestamping64 data;
+		//SO_TIMESTAMPNS gives one struct timespec (not the three of SO_TIMESTAMPING, and scm_timestamping64 is
+		//newer than some kernel headers we build against, such as EL8's)
+		timespec data;
+		if(pmsg->cmsg_len < CMSG_LEN(sizeof(data)))
+			continue;
 		memcpy(&data, CMSG_DATA(pmsg), sizeof(data));
 
-		//LogDebug("got valid timestamp\n");
-		//for(int i=0; i<3; i++)
-		//	LogDebug("[%d] %lld.%lld\n", i, data.ts[i].tv_sec, data.ts[i].tv_nsec);
-
-		//got a timestamp, for now only use the first
-		//(there can be up to 3 and its not clear which to use, but the first looks to make the most sense)
-		sec = data.ts[0].tv_sec;
-		ns = data.ts[0].tv_nsec;
+		sec = data.tv_sec;
+		ns = data.tv_nsec;
 
 		break;
 	}

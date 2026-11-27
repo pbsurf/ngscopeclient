@@ -114,9 +114,9 @@ unique_ptr<IIOContext> IIOMockContext::Create(const string& uri)
 IIOMockContext::IIOMockContext(const string& uri, const Variant& variant)
 	: m_uri(uri)
 	, m_variant(variant)
+	, m_rxSynthFromRegisters(false)
 	, m_sampleIndex(0)
 	, m_rng(0)
-	, m_rxSynthFromRegisters(false)
 {
 	m_ctxAttrs["hw_model"] = variant.hwModel;
 	m_ctxAttrs["hw_model_variant"] = "1";
